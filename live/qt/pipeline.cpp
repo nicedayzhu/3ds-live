@@ -1,7 +1,7 @@
 #include "pipeline.h"
 namespace live {
 static bool needsPictureModel(const QString &mode) {
-    return usesFbcnn(mode) || mode == "gpu" || mode == "fast-detail" || mode == "sr";
+    return usesFbcnn(mode) || usesSuperResolution(mode) || mode == "gpu" || mode == "fast-detail";
 }
 
 Pipeline::Pipeline(Timeline &t, QString dir, int s, QString m, QString f, QString precision)
@@ -36,8 +36,8 @@ void Pipeline::configure(QString m, QString f, int outputScale, QString precisio
             preparing = needsPictureModel(m);
             strictPicture = false;
             error.clear();
-            fbcnnBackend.clear();
-            fbcnnFallback.clear();
+            pictureBackend.clear();
+            pictureFallback.clear();
         }
         scale = outputScale;
         mode = std::move(m);
@@ -219,18 +219,16 @@ void Pipeline::enhanceLoop() {
                 lock.lock();
                 if (generation == probeGeneration) {
                     preparing = false;
-                    if (usesFbcnn(mode)) {
-                        fbcnnBackend = ai->fbcnnBackend();
-                        fbcnnFallback = ai->fbcnnFallback();
-                    }
+                    pictureBackend = ai->pictureBackend(requested);
+                    pictureFallback = ai->pictureFallback(requested);
                 }
             } catch (const std::exception &e) {
-                const QString fallback = ai && usesFbcnn(requested) ? ai->fbcnnFallback() : QString{};
+                const QString fallback = ai ? ai->pictureFallback(requested) : QString{};
                 ai.reset();
                 lock.lock();
                 if (generation == probeGeneration) {
                     preparing = false;
-                    fbcnnFallback = fallback;
+                    pictureFallback = fallback;
                     error = QString::fromUtf8(e.what());
                     jobs.clear();
                 }
@@ -294,7 +292,7 @@ void Pipeline::enhanceLoop() {
                 composeTotalUs += clockUs() - begin;
             }
             const Images &motionInput = hdRife ? nativeRestored :
-                (current.mode == "sr" && current.motion == "rife" ? current.images : output);
+                (usesSuperResolution(current.mode) && current.motion == "rife" ? current.images : output);
             {
                 std::lock_guard publish(mutex);
                 if (generation != current.generation || current.source.session != latestSource.session)
@@ -312,9 +310,9 @@ void Pipeline::enhanceLoop() {
                     ++enhanced;
                 }
                 inferUs = clockUs() - start;
-                if (usesFbcnn(current.mode)) {
-                    fbcnnBackend = ai->fbcnnBackend();
-                    fbcnnFallback = ai->fbcnnFallback();
+                if (ai && current.mode != "off") {
+                    pictureBackend = ai->pictureBackend(current.mode);
+                    pictureFallback = ai->pictureFallback(current.mode);
                 }
                 if (current.motion != "off" && motionError.isEmpty() && prev && prev->source.session == current.source.session &&
                     prev->generation == current.generation && current.source.pts > prev->source.pts &&
@@ -343,14 +341,14 @@ void Pipeline::enhanceLoop() {
             }
             prev = std::move(current);
         } catch (const std::exception &e) {
-            const QString fallback = ai && usesFbcnn(current.mode) ? ai->fbcnnFallback() : QString{};
+            const QString fallback = ai ? ai->pictureFallback(current.mode) : QString{};
             ai.reset();
             if (!lock.owns_lock())
                 lock.lock();
             if (generation == current.generation) {
                 error = QString::fromUtf8(e.what());
-                fbcnnBackend.clear();
-                fbcnnFallback = fallback;
+                pictureBackend.clear();
+                pictureFallback = fallback;
                 jobs.clear();
                 if (strictPicture) {
                     strictPicture = false;
@@ -495,11 +493,8 @@ void Pipeline::motionLoop() {
 QJsonObject Pipeline::stats() {
     std::lock_guard lock(mutex);
     return {{"decoded", decoded.load()},
-            {"backend", mode == "fbcnn-sr"              ? (fbcnnBackend.isEmpty() ? QString{} : fbcnnBackend + " / SR DirectML")
-                        : usesFbcnn(mode)               ? fbcnnBackend
-                        : mode == "gpu" || mode == "fast-detail" || mode == "sr" ? QStringLiteral("DirectML")
-                                                        : QStringLiteral("CPU")},
-            {"backend_fallback", usesFbcnn(mode) ? fbcnnFallback : QString()},
+            {"backend", needsPictureModel(mode) ? pictureBackend : QStringLiteral("CPU")},
+            {"backend_fallback", pictureFallback},
             {"decode_overwrites", skipped.load()},
             {"decode_errors", invalid.load()},
             {"enhanced", enhanced.load()},

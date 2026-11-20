@@ -5,7 +5,8 @@
 | 模型 | 用途 | 来源与许可 |
 | --- | --- | --- |
 | DnCNN3 | 亮度降噪 | [KAIR](https://github.com/cszn/KAIR) · [MIT](KAIR-LICENSE) |
-| SRVGGNetCompact | Real-ESRGAN 放大与修复 | Copyright 2021 Xintao Wang · [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) · [BSD 3-Clause](RealESRGAN-LICENSE) |
+| Real-ESRGAN AnimeVideo-v3（SRVGGNetCompact） | 动画画面超分 | Copyright 2021 Xintao Wang · [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) · [BSD 3-Clause](RealESRGAN-LICENSE) |
+| 2xNomosUni_span_multijpg（SPAN） | JPEG 修复与原生 2× 超分，含 FP16 和 FP32 | Philip Hofmann · [模型来源及适配说明](../SPAN/README.md) · [CC BY 4.0](../SPAN/CC-BY-4.0.txt) |
 | FBCNN color | 原生分辨率 JPEG 去块 | [FBCNN](https://github.com/jiaxi-jiang/FBCNN) · [Apache 2.0](FBCNN-LICENSE) |
 | RIFE 4.25 lite | 上下屏运动补帧 | [Practical-RIFE](https://github.com/hzwer/Practical-RIFE) · [MIT](RIFE-LICENSE) |
 

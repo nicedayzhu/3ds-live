@@ -45,13 +45,13 @@ int checkModels(QString directory, QString file, QString modes, QString rifePrec
                 passed &= output.size() == input.size() * (live::usesSuperResolution(mode) ? 2 : 1);
                 if (mode == "rife" || mode == "flow")
                     passed &= (output.cacheKey() != input.cacheKey() && output.size() == input.size());
-                if (live::usesFbcnn(mode)) {
-                    row["backend"] = ai.fbcnnBackend();
-                    row["backend_fallback"] = ai.fbcnnFallback();
-                } else if (mode == "rife") {
+                if (mode == "rife") {
                     row["rife_precision"] = rifePrecision;
                     row["backend"] = ai.rifeBackend();
                     row["backend_fallback"] = ai.rifeFallback();
+                } else if (mode != "flow") {
+                    row["backend"] = ai.pictureBackend(mode);
+                    row["backend_fallback"] = ai.pictureFallback(mode);
                 }
                 if (mode == "fbcnn") {
                     QImage ref(QDir(directory).filePath(QString("fbcnn-reference-%1.png").arg(w)));

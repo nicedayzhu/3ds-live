@@ -14,7 +14,8 @@ static const QMap<QString, QString> labels = {{"off", "原始"},
                                               {"fast-detail", "1× 实时清晰 · DnCNN"},
                                               {"fbcnn-sr", "2× 修复超分 · FBCNN + Real-ESRGAN"},
                                               {"gpu", "DnCNN 降噪"},
-                                              {"sr", "Real-ESRGAN 2× 超分"}};
+                                              {"sr", "Real-ESRGAN 2× 超分"},
+                                              {"span", "2× 实时超分 · SPAN"}};
 struct Options {
     QString ip, mode = "off", motion = "off", rifePrecision = "fp32", record, rtsp, stats, models;
     int port = 8001, scale = 1, fps = 30, rate = 800000, delay = 100;
@@ -67,7 +68,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     auto arg = [&](QString name, QString help, QString def = {}) { cli.addOption({name, help, "value", def}); };
     arg("sender", "3DS IPv4 (empty for automatic discovery)");
     arg("port", "UDP listen port", "8001");
-    arg("enhance", "off, clean, fbcnn, fbcnn-detail or fast-detail (1x), fbcnn-sr (2x), gpu or sr", "off");
+    arg("enhance", "off, clean, fbcnn, fbcnn-detail or fast-detail (1x), fbcnn-sr, sr or span (2x), or gpu", "off");
     arg("interpolate", "off, flow or rife", "off");
     arg("rife-precision", "RIFE inference precision: fp32 (default) or fp16");
     arg("scale", "Display scale 1 or 2", "1");

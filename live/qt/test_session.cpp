@@ -319,10 +319,17 @@ static int checkPipelineCapabilities(int argc, char **argv) {
     if (s["motion_backend_fallback"].toString() != firstFallback) return 7;
     if (s["restored_pairs"].toInteger() || s["restore_total_us"].toInteger() ||
         s["interpolated"].toInteger() || s["motion_work_total_us"].toInteger()) return 8;
+    pipeline.configure("span", "off", 2);
+    if (!QTest::qWaitFor([&] {
+        const auto state = pipeline.stats();
+        const auto error = state["model_error"].toString();
+        return error.contains("span-fp16.onnx") && error.contains("span.onnx") &&
+               state["backend"].toString().isEmpty() && state["motion_error"].toString().isEmpty();
+    }, 5000)) return 9;
     return 0;
 }
 
-static int checkEffectsFallback() {
+static int checkEffectsFallback(const QByteArray &pictureMode) {
     QTemporaryDir work;
     if (!work.isValid()) return 1;
     const QString stats = work.filePath("effects.jsonl");
@@ -331,7 +338,7 @@ static int checkEffectsFallback() {
     const auto port = QByteArray::number(reserve.localPort());
     reserve.close();
     QList<QByteArray> args{"test_session", "--preview", "--sender", "127.0.0.1", "--port", port, "--mute",
-        "--enhance", "fbcnn", "--interpolate", "rife", "--models", work.path().toLocal8Bit(),
+        "--enhance", pictureMode, "--interpolate", "rife", "--models", work.path().toLocal8Bit(),
         "--stats", stats.toLocal8Bit(), "--seconds", "12"};
     QVector<char *> argv;
     for (auto &arg : args) argv.append(arg.data());
@@ -351,9 +358,9 @@ static int checkEffectsFallback() {
             if (view->windowTitle() != "3DS Live") continue;
             auto *pictures = view->findChild<QMenu *>("pictureMenu");
             auto *methods = view->findChild<QMenu *>("motionMenu");
-            auto *fbcnn = choice(pictures, "fbcnn"), *clean = choice(pictures, "clean");
+            auto *picture = choice(pictures, QString::fromLatin1(pictureMode)), *clean = choice(pictures, "clean");
             auto *rife = choice(methods, "rife"), *flow = choice(methods, "flow");
-            if (!fbcnn || fbcnn->isEnabled() || !rife || rife->isEnabled() ||
+            if (!picture || picture->isEnabled() || !rife || rife->isEnabled() ||
                 !clean || !clean->isChecked() || !flow || !flow->isChecked()) return;
             if (!retried) {
                 auto *open = view->findChild<QAction *>("effectSettings");
@@ -361,8 +368,8 @@ static int checkEffectsFallback() {
                 if (!open || !open->isVisible() || !retry) return;
                 open->trigger();
                 if (!retry->isVisible()) return;
-                QObject::connect(fbcnn, &QAction::changed, &app, [&, fbcnn] {
-                    if (fbcnn->isEnabled()) reenabled = true;
+                QObject::connect(picture, &QAction::changed, &app, [&, picture] {
+                    if (picture->isEnabled()) reenabled = true;
                 });
                 retried = true;
                 retry->click();
@@ -384,9 +391,10 @@ static int checkEffectsFallback() {
     if (!reports.open(QIODevice::ReadOnly)) return 3;
     while (!reports.atEnd()) {
         const auto report = QJsonDocument::fromJson(reports.readLine()).object();
-        if (report["requested_mode"] == "fbcnn" && report["requested_motion"] == "rife" &&
+        const auto id = QString::fromLatin1(pictureMode);
+        if (report["requested_mode"] == id && report["requested_motion"] == "rife" &&
             report["mode"] == "clean" && report["motion"] == "flow" &&
-            report["picture_failures"].toObject().contains("fbcnn") &&
+            report["picture_failures"].toObject().contains(id) &&
             report["motion_failures"].toObject().contains("rife")) return 0;
     }
     return 4;
@@ -394,7 +402,9 @@ static int checkEffectsFallback() {
 
 int main(int testArgc, char **testArgv) {
     if (testArgc == 2 && QByteArray(testArgv[1]) == "--effects-fallback")
-        return checkEffectsFallback();
+        return checkEffectsFallback("fbcnn");
+    if (testArgc == 2 && QByteArray(testArgv[1]) == "--span-fallback")
+        return checkEffectsFallback("span");
     if (testArgc == 2 && QByteArray(testArgv[1]) == "--pipeline-capabilities")
         return checkPipelineCapabilities(testArgc, testArgv);
     if (testArgc == 2 && QByteArray(testArgv[1]) == "--discovery")

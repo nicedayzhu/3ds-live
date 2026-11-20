@@ -1,4 +1,5 @@
 #include "imaging.h"
+#include "model_check.h"
 #include "native_detail.h"
 #include <QtCore>
 #include <QColor>
@@ -36,6 +37,28 @@ static bool checkJpegDetail() {
            nativeDetail(textEdges, 0) == normal && nativeDetail(textEdges, 14) == textEdges;
 }
 
+// Optional hardware check: test_picture --span-fallback <release models directory>.
+static bool checkSpanFallback(const QDir &models) {
+    QTemporaryDir work;
+    if (!work.isValid() || !QFile::copy(models.filePath("span.onnx"), work.filePath("span.onnx"))) return false;
+    const QString stats = work.filePath("screens.json");
+    auto usesFp32 = [&] {
+        if (checkModels(work.path(), stats, "span", {}) != 0) return false;
+        QFile file(stats);
+        if (!file.open(QIODevice::ReadOnly)) return false;
+        const auto screens = QJsonDocument::fromJson(file.readAll()).object()["screens"].toArray();
+        if (screens.size() != 2) return false;
+        for (const auto &screen : screens) {
+            const auto row = screen.toObject();
+            if (row["backend"] != "DirectML FP32" || !row["backend_fallback"].toString().contains("DirectML FP16:") ||
+                row["output_width"].toInt() != 2 * row["width"].toInt() || row["output_height"] != 480) return false;
+        }
+        return true;
+    };
+    // Exercise both a missing FP16 model and a valid ONNX graph whose input is incompatible at dispatch.
+    return usesFp32() && QFile::copy(models.filePath("dncnn.onnx"), work.filePath("span-fp16.onnx")) && usesFp32();
+}
+
 // Optional image-quality measurements use the production receiver's codecs and model.
 // Pass an input folder of <name>-400.jpg / <name>-320.jpg and a fresh output folder.
 int main(int argc, char **argv) {
@@ -46,6 +69,8 @@ int main(int argc, char **argv) {
     if (argc == 1)
         return 0;
     const auto args = app.arguments();
+    if (args.size() == 3 && args[1] == "--span-fallback")
+        return checkSpanFallback(QDir(args[2])) ? 0 : 1;
     int quality = 0;
     if (args.size() == 5 && args[3] == "--jpeg-quality") {
         quality = args[4].toInt();
@@ -91,7 +116,7 @@ int main(int argc, char **argv) {
                     timer.start();
                     imaging.restorePair(raw, restored, mode, nullptr, nullptr, jpegQuality);
                     const double ms = timer.nsecsElapsed() / 1e6;
-                    rows << stem << ',' << mode << ',' << imaging.fbcnnBackend() << ',' << ms << '\n';
+                    rows << stem << ',' << mode << ',' << imaging.pictureBackend(mode) << ',' << ms << '\n';
                 }
                 const int scale = usesSuperResolution(mode) ? 2 : 1;
                 for (int i = 0; i < 2; ++i)
@@ -106,7 +131,7 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        qInfo() << pairs.size() << "pairs" << imaging.fbcnnBackend() << imaging.fbcnnFallback();
+        qInfo() << pairs.size() << "pairs" << imaging.pictureBackend("fbcnn") << imaging.pictureFallback("fbcnn");
     } catch (const std::exception &e) {
         qCritical() << e.what();
         return 5;

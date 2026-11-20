@@ -645,7 +645,7 @@ class Viewer final : public QWidget {
             auto *pictureMenu = submenu("画质", "pictureMenu");
             pictureMenu->setToolTipsVisible(true);
             auto *group = new QActionGroup(pictureMenu);
-            for (auto id : {"off", "fast-detail", "fbcnn", "fbcnn-detail", "fbcnn-sr", "clean", "gpu", "sr"}) {
+            for (auto id : {"off", "fast-detail", "fbcnn", "fbcnn-detail", "span", "fbcnn-sr", "clean", "gpu", "sr"}) {
                 if (QLatin1String(id) == "clean") pictureMenu->addSeparator();
                 if (!modes.contains(id)) continue;
                 auto *a = pictureMenu->addAction(modes[id].toString());
@@ -653,6 +653,10 @@ class Viewer final : public QWidget {
                     a->setToolTip("修复 JPEG 压缩产生的色块、噪点，保留原生分辨率。");
                 if (QLatin1String(id) == "fbcnn-detail")
                     a->setToolTip("先修复 JPEG，再提升原尺寸清晰度。高压缩时按双屏各自的 JPEG Q 保护文字和锐利轮廓。");
+                if (QLatin1String(id) == "span")
+                    a->setToolTip("用 SPAN 放大到 2×。优先使用 DirectML FP16，不可用时自动尝试 FP32。");
+                if (QLatin1String(id) == "sr")
+                    a->setToolTip("用 Real-ESRGAN AnimeVideo-v3 放大画面，输出 2×。");
                 a->setData(id);
                 a->setCheckable(true);
                 a->setChecked(o["mode"].toString() == id);
@@ -762,7 +766,7 @@ class Viewer final : public QWidget {
     }
     void updatePictureScale(const QString &mode, int value) {
         scale->setCurrentIndex(value == 2);
-        scale->setEnabled(mode != "sr" && mode != "fast-detail" && mode != "fbcnn-detail" && mode != "fbcnn-sr");
+        scale->setEnabled(mode != "sr" && mode != "span" && mode != "fast-detail" && mode != "fbcnn-detail" && mode != "fbcnn-sr");
         QSize target(400 * value, 480 * value);
         if (target == canvas->sizeHint()) return;
         canvas->setSourceSize(target);

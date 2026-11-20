@@ -132,6 +132,7 @@ static QImage image(const cv::Mat &m) {
 struct Imaging::Impl {
     QString folder;
     QString fbcnnBackend = "DirectML", fbcnnFallback, rifeBackend, rifeFallback;
+    QString spanBackend, spanFallback;
     QStringList rifeCandidates;
 #ifdef LIVE_TENSORRT
     QString accelerationDirectory;
@@ -207,6 +208,10 @@ struct Imaging::Impl {
             }
         }
     }
+    static int modelScale(const QString &name) {
+        if (name == "sr") return 4; // Real-ESRGAN's 4x output is reduced to 2x for display.
+        return name == "span" || name == "span-fp16" ? 2 : 1;
+    }
     Ort::Session &session(const QString &name, int width, const QString &key) {
         auto it = models.find(key);
         if (it != models.end())
@@ -229,7 +234,7 @@ struct Imaging::Impl {
         if (!fixedWidth) {
             Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(options, "width", width));
             Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(options, "output_width",
-                                                                           width * (name == "sr" ? 4 : 1)));
+                                                                           width * modelScale(name)));
         }
         return models.emplace(key, Ort::Session(env, path.toStdWString().c_str(), options)).first->second;
     }
@@ -266,7 +271,7 @@ struct Imaging::Impl {
         auto result = session(mode, w, key).Run(Ort::RunOptions{nullptr}, names, values, b.empty() ? 1 : 2, &out, 1);
         if (initialization.owns_lock()) initialization.unlock();
         auto dims = result[0].GetTensorTypeAndShapeInfo().GetShape();
-        int scale = mode == "sr" ? 4 : 1;
+        const int scale = modelScale(mode);
         if (dims != std::vector<int64_t>{1, channels, h * scale, w * scale})
             throw std::runtime_error("Unexpected ONNX output dimensions");
         float *ptr = result[0].GetTensorMutableData<float>();
@@ -276,6 +281,27 @@ struct Imaging::Impl {
         cv::Mat merged;
         cv::merge(planes, merged);
         return merged;
+    }
+    cv::Mat runSpan(const cv::Mat &pixels) {
+        if (spanFallback.isEmpty()) {
+            try {
+                auto output = run("span-fp16", pixels);
+                spanBackend = "DirectML FP16";
+                return output;
+            } catch (const std::exception &e) {
+                spanFallback = "DirectML FP16: " + QString::fromUtf8(e.what());
+                for (int width : {400, 320})
+                    models.erase("span-fp16" + QString::number(width));
+            }
+        }
+        try {
+            auto output = run("span", pixels);
+            spanBackend = "DirectML FP32";
+            return output;
+        } catch (const std::exception &e) {
+            spanBackend.clear();
+            throw std::runtime_error((spanFallback + "\nDirectML FP32: " + QString::fromUtf8(e.what())).toStdString());
+        }
     }
 };
 Imaging::Imaging(QString folder, QString precision) : impl(new Impl) {
@@ -295,11 +321,16 @@ Imaging::Imaging(QString folder, QString precision) : impl(new Impl) {
     impl->rifeCandidates << "DirectML";
 }
 Imaging::~Imaging() = default;
-QString Imaging::fbcnnBackend() const {
-    return impl->fbcnnBackend;
+QString Imaging::pictureBackend(const QString &mode) const {
+    if (mode == "span") return impl->spanBackend;
+    if (mode == "fbcnn-sr") return impl->fbcnnBackend + " / SR DirectML";
+    if (usesFbcnn(mode)) return impl->fbcnnBackend;
+    if (mode == "sr" || mode == "gpu" || mode == "fast-detail") return "DirectML";
+    return "CPU";
 }
-QString Imaging::fbcnnFallback() const {
-    return impl->fbcnnFallback;
+QString Imaging::pictureFallback(const QString &mode) const {
+    if (mode == "span") return impl->spanFallback;
+    return usesFbcnn(mode) ? impl->fbcnnFallback : QString{};
 }
 QString Imaging::rifeBackend() const { return impl->rifeBackend; }
 QString Imaging::rifeFallback() const { return impl->rifeFallback; }
@@ -389,8 +420,8 @@ QImage Imaging::restore(const QImage &im, const QString &mode) {
     cv::Mat in = rgb(im), result;
     if (mode == "off")
         return im;
-    if (mode == "fbcnn" || mode == "sr") {
-        auto net = impl->run(mode, in);
+    if (mode == "fbcnn" || mode == "sr" || mode == "span") {
+        auto net = mode == "span" ? impl->runSpan(in) : impl->run(mode, in);
         if (mode == "sr") {
             cv::Mat reduced, base;
             cv::resize(net, reduced, {}, .5, .5, cv::INTER_AREA);

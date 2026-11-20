@@ -32,7 +32,7 @@ class Pipeline {
     std::mutex mutex;
     std::condition_variable decodeReady, enhanceReady, motionReady;
     bool done = false, preparing = false, strictPicture = false;
-    QString mode, motion, rifePrecision, error, motionError, fbcnnBackend, fbcnnFallback, rifeBackend, rifeFallback;
+    QString mode, motion, rifePrecision, error, motionError, pictureBackend, pictureFallback, rifeBackend, rifeFallback;
     int generation = 0, motionGeneration = 0, sessionEpoch = 0;
     std::deque<Packet> pending;
     // Snapshot both compressed panels in every queued job so coalescing cannot lose

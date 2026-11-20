@@ -10,7 +10,7 @@ using DeviceImages = std::array<std::shared_ptr<DeviceEndpoint>, 2>;
 inline bool usesFbcnn(const QString &mode) {
     return mode == "fbcnn" || mode == "fbcnn-detail" || mode == "fbcnn-sr";
 }
-inline bool usesSuperResolution(const QString &mode) { return mode == "sr" || mode == "fbcnn-sr"; }
+inline bool usesSuperResolution(const QString &mode) { return mode == "sr" || mode == "fbcnn-sr" || mode == "span"; }
 inline bool isNativeDetail(const QString &mode) { return mode == "fbcnn-detail" || mode == "fast-detail"; }
 void configureOpenCV();
 QString resolveRifePrecision(QString precision);
@@ -27,8 +27,8 @@ class Imaging {
     // Null entries reuse the last screen result.
     void restorePair(const Images &changed, Images &output, const QString &mode, Images *nativeRestored = nullptr,
                      DeviceImages *deviceOutput = nullptr, const std::array<int, 2> &jpegQuality = {});
-    QString fbcnnBackend() const;
-    QString fbcnnFallback() const;
+    QString pictureBackend(const QString &mode) const;
+    QString pictureFallback(const QString &mode) const;
     QString rifeBackend() const;
     QString rifeFallback() const;
     void warmRife();

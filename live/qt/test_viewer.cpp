@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
     if (settings->isVisible() || !canvas->isVisible())
         return 11;
     live::destroyView(view);
-    view = live::createView(QJsonDocument::fromJson(R"({"title":"Live QA","width":400,"height":480,"interpolate":"flow","motion":true,"mode":"off","modes":{"off":"原始","fbcnn":"FBCNN 高画质","gpu":"DnCNN 降噪"}})").object());
+    view = live::createView(QJsonDocument::fromJson(R"({"title":"Live QA","width":400,"height":480,"interpolate":"flow","motion":true,"mode":"off","modes":{"off":"原始","fbcnn":"FBCNN 高画质","gpu":"DnCNN 降噪","span":"2× 实时超分 · SPAN"}})").object());
     root = nullptr;
     for (auto *widget : QApplication::topLevelWidgets())
         if (widget->windowTitle() == "Live QA") root = widget;
@@ -194,6 +194,12 @@ int main(int argc, char **argv) {
     update(R"({"mode":"fbcnn-sr","scale":2})");
     canvas = root->findChild<QWidget *>("canvas");
     if (!canvas || canvas->sizeHint() != QSize(800,960)) return 29;
+    auto *span = actionFor(pictureMenu, "span");
+    if (!span || !span->isEnabled()) return 92;
+    span->trigger();
+    if (actions() != QJsonArray{QJsonObject{{"type", "mode"}, {"value", "span"}}}) return 93;
+    update(R"({"mode":"span","scale":2})");
+    if (!span->isChecked() || canvas->sizeHint() != QSize(800,960)) return 94;
     update(R"({"mode":"fbcnn-detail","scale":1})");
     if (canvas->sizeHint() != QSize(400,480) || root->width() != 400) return 30;
     root->resize(240, 400);

@@ -124,6 +124,12 @@ $notices = Join-Path $repo 'third_party/PCEnhance'
 foreach ($file in Get-ChildItem -LiteralPath $notices -File -Recurse) {
     Install-RuntimeFile $file.FullName ('licenses/PCEnhance/' + [IO.Path]::GetRelativePath($notices, $file.FullName))
 }
+$spanDirectory = Join-Path $repo 'third_party/SPAN'
+$spanModels = 'span-fp16.onnx','span.onnx'
+$spanNotices = 'README.md','CC-BY-4.0.txt','SPAN-Apache-2.0.txt'
+foreach ($name in $spanNotices) {
+    Install-RuntimeFile (Join-Path $spanDirectory $name) "licenses/SPAN/$name"
+}
 Install-RuntimeFile "$cache/ort/LICENSE" 'licenses/ONNX-Runtime.txt'
 Install-RuntimeFile "$cache/ort/ThirdPartyNotices.txt" 'licenses/ONNX-Notices.txt'
 Install-RuntimeFile "$cache/dml/LICENSE.txt" 'licenses/DirectML.txt'
@@ -133,6 +139,9 @@ Install-RuntimeFile "$av/README.txt" 'licenses/FFmpeg-build.txt'
 foreach ($entry in Get-Content "$PSScriptRoot/models.sha256") {
     $hash,$file = $entry.Split(' ')
     $asset = "$Models/$file"
+    if ($file -in $spanModels -and !(Test-Path -LiteralPath $asset)) {
+        $asset = Join-Path $spanDirectory $file
+    }
     if (!(Test-Path -LiteralPath $asset)) { throw "Supply the models folder from the native release with -Models. Missing $file" }
     if ((Get-FileHash -LiteralPath $asset).Hash -ne $hash) { throw "$file checksum mismatch" }
     Install-RuntimeFile $asset "models/$file"
@@ -242,8 +251,13 @@ if ($Zip) {
         foreach ($file in 'LICENSE','codec/source/live_codec.c','codec/source/live_audio.c','codec/host/live_audio_output.c') {
             Add-SourceFile "$repo/$file" $file
         }
+        foreach ($name in $spanNotices + $spanModels) {
+            Add-SourceFile (Join-Path $spanDirectory $name) "third_party/SPAN/$name"
+        }
         foreach ($entry in $payload) {
-            if ($entry -like 'models/*.onnx') { Add-SourceFile (Join-Path $runtime $entry) "live/qt/$entry" }
+            if ($entry -like 'models/*.onnx' -and [IO.Path]::GetFileName($entry) -notin $spanModels) {
+                Add-SourceFile (Join-Path $runtime $entry) "live/qt/$entry"
+            }
         }
     } finally { $zipFile.Dispose(); $stream.Dispose() }
     Move-Item -LiteralPath "$source.partial" -Destination $source -Force
