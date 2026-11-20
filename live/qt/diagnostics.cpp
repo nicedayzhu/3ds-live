@@ -76,7 +76,7 @@ QJsonObject diagnoseFrameDrops(const QJsonObject &current, const QJsonArray &his
         ? sentCount * 1000. / elapsed : -1;
     auto slower = [](double expected, double actual) { return expected - actual > std::max(2., expected * .10); };
     if (gear > 0 && gear < requested)
-        note("rate", "降档", QString("掌机当前 %1 FPS，所选上限 %2 FPS。").arg(gear).arg(requested));
+        note("rate", "帧率档位", QString("掌机报告 %1 FPS，所选目标为 %2 FPS。").arg(gear).arg(requested));
     const bool senderSlow = sameGear && sent >= 0 && slower(gear, sent);
     if (senderSlow)
         note("sender", "发送", QString("掌机报告发送 %1 FPS，当前档位 %2 FPS。").arg(sent, 0, 'f', 1).arg(gear));

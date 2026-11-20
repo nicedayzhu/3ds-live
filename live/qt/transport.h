@@ -20,7 +20,7 @@ struct Counts {
 };
 quint32 word(QByteArrayView bytes, int index);
 QByteArray message(QByteArray magic, std::initializer_list<quint32> words);
-int captureFps(int limit, int targetRate, int effectiveRate, bool audio, int supported, int current);
+int supportedCaptureFps(int requested, int supported, int current);
 
 // Upward probes use receiver cadence and paired delivery between successive sender
 // status reports. Loss and congestion decisions still use the latest receiver tick.

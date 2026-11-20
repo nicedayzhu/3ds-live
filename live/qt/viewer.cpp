@@ -462,7 +462,7 @@ class Viewer final : public QWidget {
         connection->addRow("监听端口", port);
         fps = new QComboBox(settings);
         rate = new QComboBox(settings);
-        connection->addRow("目标帧率上限", fps);
+        connection->addRow("目标帧率", fps);
         connection->addRow("目标码率上限", rate);
         scale = new QComboBox(settings);
         scale->addItem("原生 1×", 1);

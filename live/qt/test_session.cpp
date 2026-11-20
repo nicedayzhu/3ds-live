@@ -192,8 +192,8 @@ static int checkReceiverHandover(int argc, char **argv) {
     }
     if (!splitCommand(0, 1)) return 10;
 
-    // An audio sender at a low cap can fail to fit a single pair. Its status
-    // has a monotonic device clock even when UDP reports arrive out of order.
+    // A stalled audio sender keeps the user's cadence, including after reordered
+    // status packets and when a new session starts.
     constexpr unsigned supported = (1u << 20) | (1u << 30);
     auto audioStatus = [&](unsigned session, unsigned elapsed, unsigned cap, unsigned sent) {
         first.writeDatagram(live::message("R9ST", {session, elapsed, cap, cap - 100000, 30, sent, sent,
@@ -217,13 +217,38 @@ static int checkReceiverHandover(int argc, char **argv) {
     audioStatus(82, 2000, 600000, 50);
     if (!selected(82, 2000, 30)) return 12;
     audioStatus(82, 3000, 600000, 50);
-    if (!selected(82, 3000, 20)) return 13;
+    if (!selected(82, 3000, 30)) return 13;
     audioStatus(83, 1000, 600000, 50);
     if (!selected(83, 1000, 30)) return 14;
     receiver.configure(30, 800000);
     for (unsigned i = 0; i < 4; ++i)
         audioStatus(83, 2000 + i * 1000, 800000, 50);
-    return selected(83, 5000, 30) ? 0 : 15;
+    if (!selected(83, 5000, 30)) return 15;
+
+    // Drop the last fragments of every pair until the ordinary feedback loop
+    // requests a lower byte rate. Check the actual configuration on the wire.
+    const QByteArray fragment(live::Chunk, '\0');
+    unsigned seq = 0;
+    bool reducedCap = false;
+    for (unsigned tick = 0; tick < 24 && !reducedCap; ++tick) {
+        audioStatus(83, 5250 + 250 * tick, 800000, 50);
+        for (int i = 0; i < 8; ++i) {
+            ++seq;
+            const auto header = live::message("R10P", {83, seq, seq * 33333, 2000, 1500, 0, 30});
+            first.writeDatagram(header + fragment, local, port);
+        }
+        QTest::qWait(250);
+        while (first.hasPendingDatagrams()) {
+            const auto cmd = first.receiveDatagram().data();
+            if ((!cmd.startsWith("R6CF") && !cmd.startsWith("R10C")) || live::word(cmd, 0) != 83) continue;
+            if (live::word(cmd, 2) != 30) return 16;
+            if (live::word(cmd, 3) <= 600000) reducedCap = true;
+        }
+    }
+    if (!reducedCap) return 17;
+    receiver.configure(20, 800000);
+    audioStatus(83, 12000, 600000, 50);
+    return selected(83, 12000, 20) ? 0 : 18;
 }
 
 static int checkDiscovery(int argc, char **argv) {

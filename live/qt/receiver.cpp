@@ -126,7 +126,6 @@ void Receiver::run() {
     constexpr int allFps = (1 << 15) | (1 << 20) | (1 << 24) | (1 << 30);
     std::optional<qint64> baseline;
     int lagMs = 0, severeIntervals = 0, pressureIntervals = 0;
-    int stallReports = 0, sourceFpsLimit = 30;
     std::array<int, 2> qualitySum{}, qualityCount{};
     std::array<qint64, 2> panelCount{}, beforePanelCount{};
     std::optional<quint32> lastBottomPts;
@@ -342,8 +341,7 @@ void Receiver::run() {
                 lastConfig = lastVideo = 0;
                 lastPairUs = intervalPairGap = 0;
                 baseline.reset();
-                lagMs = severeIntervals = pressureIntervals = stallReports = 0;
-                sourceFpsLimit = 30;
+                lagMs = severeIntervals = pressureIntervals = 0;
                 sentFps = 0;
                 qualitySum = qualityCount = {};
                 jpegWireBytes = compactScreens = fullJpegScreens = 0;
@@ -376,30 +374,12 @@ void Receiver::run() {
                                                          assembler.counts.fullPairs};
                 recovery.confirm(hz, cap, now, delivery);
                 latestStatusMs = elapsed;
-                if (!sameConfig) {
+                if (!sameConfig)
                     lastSent.reset();
-                    stallReports = 0;
-                }
                 if (!lastSent || quint32(elapsed - lastProgressMs) >= 900) {
                     const auto interval = elapsed - lastProgressMs;
                     if (lastSent)
                         sentFps = quint32(sent - *lastSent) * 1000. / interval;
-                    // Only consecutive reports at a confirmed low audio/video cap
-                    // can establish that no pair fits the current capture cadence.
-                    const bool stalled = lastSent && interval <= 2500 && sent == *lastSent &&
-                        cap == effective && cap <= 600000 && b.size() == 108 && word(b, 18);
-                    stallReports = stalled ? stallReports + 1 : 0;
-                    if (stallReports >= 2 && hz <= sourceFpsLimit) {
-                        for (int lower : {24, 20, 15}) {
-                            if (lower < hz && (mask & (1 << lower))) {
-                                sourceFpsLimit = lower;
-                                changed = now;
-                                stable = 0;
-                                break;
-                            }
-                        }
-                        stallReports = 0;
-                    }
                     lastProgressMs = elapsed;
                     lastSent = sent;
                 }
@@ -450,8 +430,6 @@ void Receiver::run() {
             seenRevision = revision;
             recovery = {};
             effective = requestedRate.load();
-            sourceFpsLimit = 30;
-            stallReports = 0;
             lastSent.reset();
             lastConfig = 0;
             pressureIntervals = severeIntervals = 0;
@@ -460,8 +438,7 @@ void Receiver::run() {
         }
         int target = std::min(requestedRate.load(), deviceMax);
         effective = std::min(effective, target);
-        const int freq = captureFps(std::min(requestedFps.load(), sourceFpsLimit), target, effective,
-                                    device.value("device_audio_enabled").toBool(), mask, hz);
+        const int freq = supportedCaptureFps(requestedFps.load(), mask, hz);
         if (remote && current && now - lastConfig > 500000 && now - lastSeen < 2000000 && freq > 0 &&
             (hz != freq || cap != effective || !assembler.combined ||
              (splitSupported && splitActive))) {
@@ -530,16 +507,6 @@ void Receiver::run() {
                     stable = 0;
                     break;
                 }
-        if (stable >= 15 && now - changed >= 20000000 && effective == target && sourceFpsLimit < requestedFps.load()) {
-            for (int higher : {20, 24, 30}) {
-                if (higher > sourceFpsLimit && higher <= requestedFps.load() && (mask & (1 << higher))) {
-                    sourceFpsLimit = higher;
-                    stable = 0;
-                    changed = now;
-                    break;
-                }
-            }
-        }
         if (current && remote && now - lastSeen < 2000000)
             socket.writeDatagram(
                 message("R3FB", {*current, quint32(now / 1000), quint32(c.packets), quint32(c.complete * 2),
