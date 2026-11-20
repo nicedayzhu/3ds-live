@@ -69,7 +69,7 @@ The launcher supports English and Simplified Chinese. Chinese systems default to
 
 默认双屏 30 FPS、0.8 MB/s，开启立体声。0.8 MB/s 是整条推流的上限，启用声音时掌机会预留 0.1 MB/s 给音频。在工具栏 **FPS** 手动选择两屏共同的目标帧率。遇到持续丢包时，播放器会调低码率，掌机按所选帧率继续采集。每对 JPEG 能使用的字节会随码率减少。底栏 **ⓘ** 可查看实际收齐 FPS、当前码率和双屏 JPEG Q；链路丢帧时，实际收齐 FPS 可能低于目标。
 
-PC 上可以直接调节画质与码率，按 **F12** 查看诊断，按 **Ctrl+R** 将直播保存为 MP4。其余画质、补帧和 RTSP 选项见随包的 `Windows/runtime/README.md`。
+PC 上可以直接调节画质与码率，按 **F12** 查看诊断，按 **Ctrl+R** 将直播保存为 MP4。其余画质、补帧和 RTSP 选项见[Windows 播放器操作说明](live/qt/README.md)。
 
 已有适配本机显卡的 TensorRT 加速包时，可将原来的 `Windows/runtime/acceleration` 整个目录复制到新播放器的相同位置。播放时可在性能卡上查看 FBCNN 和 RIFE 实际使用的后端。
 

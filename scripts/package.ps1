@@ -7,33 +7,13 @@ $windows = Join-Path $dist 'Windows'
 $version = (Get-Content -LiteralPath "$repo/VERSION" -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid 3DS Live bundle VERSION.' }
 $archive = Join-Path $dist "3DS-Live-$version-Windows-x64-New3DS.zip"
+$guide = Join-Path $dist '使用指南.html'
 $files = [ordered]@{
-    '使用指南.md' = "$repo/INSTALL.md"
+    '使用指南.html' = $guide
+    'licenses/LICENSE' = "$repo/LICENSE"
     'licenses/JPEGENC-LICENSE' = "$repo/third_party/JPEGENC/LICENSE"
     'licenses/NotoSansSC-OFL.txt' = "$repo/app/assets/NotoSansSC-OFL.txt"
 }
-# Keep relative links usable in the extracted README, guides and measurement reports.
-foreach ($relative in @(
-    'README.md', 'INSTALL.md', 'LICENSE'
-    'docs/DEVELOPMENT.md', 'docs/CREDITS.md'
-    'docs/images/launcher-states.png', 'docs/images/windows-player.png', 'docs/images/mk7-race.png'
-    'docs/images/home-homebrew.png', 'docs/images/home-mario-maker.png', 'docs/images/home-mario-kart.png'
-    'docs/images/platforms.svg', 'live/qt/assets/3ds-live.png'
-    'live/qt/README.md', 'live/docs/PROTOCOL.md'
-    'live/docs/HARDWARE-1.2.8.md', 'live/docs/hardware-1.2.8-mk7.png'
-    'live/docs/SOURCE-QUALITY.md', 'live/docs/native-handheld-080.png', 'live/docs/native-jpeg-budget.csv'
-    'live/docs/SUPER-RESOLUTION.md', 'live/docs/sr-handheld-crops.png', 'live/docs/sr-panel-scores.csv'
-    'live/docs/sr-quality-sweep.csv'
-    'codec/include/live_pair.h', 'codec/include/live_audio_transport.h', 'sysmod/source/live_stream.c', 'live/qt/pipeline.cpp'
-    'app/assets/NotoSansSC-OFL.txt', 'third_party/JPEGENC/LICENSE'
-    'live/qt/licenses/NOTICE.txt', 'live/qt/licenses/LGPL-3.0-only.txt', 'live/qt/licenses/GPL-3.0-only.txt'
-    'third_party/PCEnhance/README.md', 'third_party/PCEnhance/FBCNN-LICENSE', 'third_party/PCEnhance/KAIR-LICENSE'
-    'third_party/PCEnhance/RealESRGAN-LICENSE', 'third_party/PCEnhance/RIFE-LICENSE'
-    'third_party/SPAN/README.md', 'third_party/SPAN/CC-BY-4.0.txt', 'third_party/SPAN/SPAN-Apache-2.0.txt'
-)) {
-    $files[$relative] = Join-Path $repo $relative
-}
-$documentation = @($files.Keys)
 foreach ($name in '3DS-Live.exe','runtime/3ds-live-client.dll') {
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $windows $name))
     if ($info.ProductVersion -ne $version) { throw "Rebuild $name for release $version." }
@@ -82,14 +62,33 @@ foreach ($line in Get-Content -LiteralPath "$windows/files.sha256") {
 foreach ($name in '3DS-Live.exe','runtime/3ds-live-client.dll','runtime/platforms/qwindows.dll','runtime/models/models.sha256') {
     if (!$files.Contains("Windows/$name")) { throw "Missing Windows file $name." }
 }
+$body = (ConvertFrom-Markdown -LiteralPath "$repo/INSTALL.md").Html
+$body = $body.Replace('href="live/qt/README.md"', 'href="Windows/runtime/README.md"')
+$body = [regex]::Replace($body, '<img src="(docs/images/[^"/]+\.png)"', {
+    param($match)
+    $bytes = [IO.File]::ReadAllBytes((Join-Path $repo $match.Groups[1].Value))
+    '<img src="data:image/png;base64,' + [Convert]::ToBase64String($bytes) + '"'
+})
+if ($body -match '<img src="(?!data:)') { throw 'The offline guide contains an unbundled image.' }
+$html = @"
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3DS Live 使用指南</title>
+<style>
+body { max-width: 54rem; margin: auto; padding: 1rem; font: 1rem/1.65 system-ui, sans-serif; color: #20282c; }
+img { max-width: 100%; height: auto; }
+table { border-collapse: collapse; }
+td, th { padding: .4rem .65rem; border: 1px solid #c8cfd2; text-align: left; }
+code { overflow-wrap: anywhere; }
+</style></head><body><main>
+$body
+</main></body></html>
+"@
+[IO.File]::WriteAllText($guide,$html,[Text.UTF8Encoding]::new($false))
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $temp = "$archive.$([Guid]::NewGuid().ToString('N')).tmp"
 try {
-    foreach ($relative in $documentation) {
-        $target = Join-Path $dist $relative
-        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
-        Copy-Item -LiteralPath $files[$relative] -Destination $target -Force
-    }
     $zip = [IO.Compression.ZipFile]::Open($temp,[IO.Compression.ZipArchiveMode]::Create)
     try {
         foreach ($entry in $files.GetEnumerator()) {
