@@ -189,6 +189,9 @@ static u32 clockPid;
 static bool boostActive;
 static u64 quietUntil;
 
+enum { MCU_HOME_PRESSED = 0x204, MCU_HOME_RELEASED = 0x205 };
+static const u64 homeTransitionTicks = 3ull * SYSCLOCK_ARM11 / 4;
+
 static int clock_state(void)
 {
     s64 mhz, cache;
@@ -231,6 +234,8 @@ int main(void)
         srvSubscribe(0x100); // PM requests termination.
         srvSubscribe(PTMNOTIFID_SHUTDOWN);
         srvSubscribe(0x10C); // NS may choose a different CPU mode for a newly started application.
+        srvSubscribe(MCU_HOME_PRESSED);
+        srvSubscribe(MCU_HOME_RELEASED);
         srvSubscribe(0x213); // Lid opened.
         srvSubscribe(0x214); // Lid closed.
         srvSubscribe(LIVE_LAUNCHER_OPENED);
@@ -242,6 +247,7 @@ int main(void)
     update_status(MODULE_IDLE, 0, idleLight);
     const u32 toggleKeys = KEY_R | KEY_SELECT;
     bool running = false, held = false, awake = true, resume = false, quit = false, previousPeer = false;
+    u64 homeResumeAt = 0;
     while (!quit) {
         while (notification && R_SUCCEEDED(svcWaitSynchronization(notification, 0))) {
             u32 note;
@@ -253,16 +259,26 @@ int main(void)
                 if (note == LIVE_LAUNCHER_OPENED && !running) startResult = 0;
             }
             if (note == 0x10C) {
-                if (running) capture_reset();
+                if (running) capture_invalidate();
                 clockBefore = -1;
                 boostActive = false;
                 quietUntil = svcGetSystemTick() + 15ull * SYSCLOCK_ARM11;
+            }
+            if ((note == MCU_HOME_PRESSED || note == MCU_HOME_RELEASED) && running) {
+                // Both edges belong to the button. Neither tells us when the
+                // switch has finished. Resume even if only one edge arrives.
+                if (!homeResumeAt) {
+                    live_set_capture_paused(true);
+                    capture_invalidate();
+                }
+                homeResumeAt = svcGetSystemTick() + homeTransitionTicks;
             }
             if (note == 0x214) {
                 awake = false;
                 if (running) {
                     stop_stream();
                     running = false;
+                    homeResumeAt = 0;
                     resume = true;
                 }
             }
@@ -276,6 +292,7 @@ int main(void)
                 if (running) {
                     stop_stream();
                     running = false;
+                    homeResumeAt = 0;
                     startResult = 0;
                     idleLight = LED_STATE_OFF;
                 } else {
@@ -292,8 +309,14 @@ int main(void)
                     if (!peer) capture_reset();
                     previousPeer = peer;
                 }
-                set_boost(peer);
-                if (peer) capture_poll();
+                if (homeResumeAt && svcGetSystemTick() >= homeResumeAt) {
+                    live_set_capture_paused(false);
+                    homeResumeAt = 0;
+                }
+                if (!homeResumeAt) {
+                    set_boost(peer);
+                    if (peer) capture_poll();
+                }
             }
         }
         ModuleState state = MODULE_IDLE;
@@ -302,7 +325,7 @@ int main(void)
         else if (R_FAILED(startResult)) state = MODULE_ERROR;
         const LedState light = status_led_state(awake, running, running && previousPeer && live_receiver_has_video(), idleLight);
         update_status(state, startResult, light);
-        svcSleepThread(running && previousPeer ? 2000000 : 12000000);
+        svcSleepThread(running && previousPeer && !homeResumeAt ? 2000000 : 12000000);
     }
     if (running) stop_stream();
     if (notification) svcCloseHandle(notification);

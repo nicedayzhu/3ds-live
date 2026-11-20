@@ -40,6 +40,7 @@ static LiveDiscovery discovery;
 static LiveReceiverFeedback receiverFeedback;
 static bool receiverVideo;
 static bool automaticHost,mediaReady;
+static bool capturePaused;
 static u64 lastProbeTick;
 static u32 localAddress,localMask;
 static struct {
@@ -72,6 +73,20 @@ static u32 get32(const u8 *p){return (u32)p[0]|(u32)p[1]<<8|(u32)p[2]<<16|(u32)p
 static void put32(u8 *p,u32 n){for(unsigned i=0;i<4;i++)p[i]=(u8)(n>>(8*i));}
 static void put16(u8 *p,u16 n){p[0]=(u8)n;p[1]=(u8)(n>>8);}
 static bool stopped(void){return __atomic_load_n(&stopping,__ATOMIC_ACQUIRE);}
+static bool capture_paused(void){return __atomic_load_n(&capturePaused,__ATOMIC_ACQUIRE);}
+
+void live_set_capture_paused(bool paused) {
+    LightLock_Lock(&lock);
+    if(paused&&!capture_paused()) {
+        // Reject a JPEG still being encoded and forget the previous display plan.
+        ++configEpoch;
+        planMask=0;
+        if(pendingReady)live_timing_drop_pending(TIMING_RECONFIGURED);
+        pendingReady=false;
+    }
+    __atomic_store_n(&capturePaused,paused,__ATOMIC_RELEASE);
+    LightLock_Unlock(&lock);
+}
 bool live_requested(void) {
     if(worker)return enabled;
     enabled=true;compactJpeg=true;audioEnabled=true;combinedFec=true;fps=30;rate=800000;
@@ -102,7 +117,7 @@ u32 live_fps(void){return __atomic_load_n(&fps,__ATOMIC_RELAXED);}
 bool live_peer_ready(void){return !stopped()&&__atomic_load_n(&mediaReady,__ATOMIC_ACQUIRE);}
 bool live_receiver_has_video(void){return !stopped()&&__atomic_load_n(&receiverVideo,__ATOMIC_ACQUIRE);}
 u32 live_encoded_frames(unsigned sc){return sc<2?__atomic_load_n(&jpegFrames[sc],__ATOMIC_RELAXED):0;}
-bool live_audio_active(void){return audioEnabled&&worker&&!stopped();}
+bool live_audio_active(void){return audioEnabled&&worker&&!stopped()&&!capture_paused();}
 bool live_audio_submit(const s16 *pcm,u32 pts) {
     if(!pcm||!live_audio_active()||!live_peer_ready())return false;
     return live_audio_queue_push(&audioQueue,pcm,pts,svcGetSystemTick());
@@ -175,7 +190,7 @@ static void encoder(void *arg) {
     u64 next=svcGetSystemTick();
     u32 budgetEpoch=0,budgetRate=0;
     while(!stopped()) {
-        if(!live_peer_ready()){svcSleepThread(10000000);continue;}
+        if(!live_peer_ready()||capture_paused()){svcSleepThread(10000000);continue;}
         u64 now=svcGetSystemTick();
         if(now<next){svcSleepThread((next-now)*1000000000ull/SYSCLOCK_ARM11);continue;}
         bool ready;u32 stamp=0,source[2]={0,0},wanted[2],jobRate,jobFps,epoch;
@@ -214,7 +229,7 @@ static void encoder(void *arg) {
         if(!run_pair_job(1,q))break;
         live_timing_encoded();
         /* Bounded requantization: reuse DCT, at most 3 entropy passes. */
-        for(unsigned retry=0;retry<2;retry++) {
+        for(unsigned retry=0;retry<2&&!capture_paused();retry++) {
             /* A rate cut may arrive during the DCT. Reuse it for the normal
              * bounded entropy retries instead of abandoning the frame. */
             LightLock_Lock(&lock);
@@ -546,7 +561,7 @@ static void sender(void *unused) {
     (void)unused;u64 due=svcGetSystemTick();
     while(!stopped()) {
         control(&due);
-        if(!mediaReady){svcSleepThread(10000000);continue;}
+        if(!mediaReady||capture_paused()){svcSleepThread(10000000);continue;}
         send_audio(&due);
         u32 sizes[2]={0,0},seq=0,stamp=0;u64 queued=0;bool ready;
         LightLock_Lock(&lock);ready=pendingReady&&pendingEpoch==configEpoch;
@@ -593,6 +608,7 @@ Result live_start(void *(*allocate)(u32 bytes)) {
     LightLock_Init(&lock);for(unsigned i=0;i<2;i++)LightLock_Init(&rawLocks[i]);
     for(unsigned i=0;i<3;i++)LightEvent_Init(&events[i],RESET_ONESHOT);
     started=svcGetSystemTick();stopping=false;jobDone=1;pendingReady=false;planMask=0;
+    __atomic_store_n(&capturePaused,false,__ATOMIC_RELEASE);
     memset(rawValid,0,sizeof rawValid);memset(attempts,0,sizeof attempts);memset(jpegFrames,0,sizeof jpegFrames);
     memset(maxUs,0,sizeof maxUs);memset(maxBytes,0,sizeof maxBytes);memset(sumUs,0,sizeof sumUs);
     memset(convertCount,0,sizeof convertCount);memset(convertMaxUs,0,sizeof convertMaxUs);memset(convertSumUs,0,sizeof convertSumUs);
@@ -689,7 +705,7 @@ void live_stop(void) {
     fclose(f);
 }
 bool live_submit(int sc,const u8 *frame,u32 fmt,u32 stride,u32 pts,bool wide) {
-    if(sc<0||sc>1||!worker||stopped()||wide)return false;
+    if(sc<0||sc>1||!worker||stopped()||capture_paused()||wide)return false;
     u64 begin=svcGetSystemTick();u32 w=sc?320:400;
     /* Exact native-source comparison precedes color conversion. Only changed
      * MCUs enter the compact YCbCr420 snapshot; no RGB565 staging frame. */

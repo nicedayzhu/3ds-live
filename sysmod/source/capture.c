@@ -18,7 +18,7 @@ typedef struct {
     Handle dma;
     u32 addr, observedAddr, selection, mode, stride, bytes, capacity, submittedPts;
     u64 captured, modeChanged, retryAfter, lastPoll;
-    u32 lastSwapUs;
+    u32 lastSwapUs, retryDelayUs;
     bool valid, wide, pendingChange, preciseSwap;
     u32 dmaMode, dmaStride;
     u64 dmaTick;
@@ -100,18 +100,25 @@ static bool framebuffer_mapped(Handle app, u32 va, u32 bytes)
     return va >= end;
 }
 
-static Handle copy_display(const Screen *screen)
+static Handle start_display_dma(const Screen *screen, Handle source, u32 address)
 {
     Handle dma = 0;
     DmaConfig config;
     dmaConfigInitDefault(&config);
     config.flags = 0;
+    // Only touch the destination cache after establishing a readable source.
+    if (R_FAILED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)screen->pixels, screen->bytes))) return 0;
+    if (R_FAILED(svcStartInterProcessDma(&dma, CUR_PROCESS_HANDLE, (u32)screen->pixels,
+                                         source, address, screen->bytes, &config))) return 0;
+    return dma;
+}
+
+static Handle copy_display(const Screen *screen)
+{
     if (in_vram(screen->addr)) {
         const u32 offset = screen->addr - VRAM_PHYS;
         if (screen->bytes > VRAM_BYTES - offset) return 0;
-        if (R_FAILED(svcStartInterProcessDma(&dma, CUR_PROCESS_HANDLE, (u32)screen->pixels,
-                     CUR_PROCESS_HANDLE, VRAM_MAPPED + offset, screen->bytes, &config))) return 0;
-        return dma;
+        return start_display_dma(screen, CUR_PROCESS_HANDLE, VRAM_MAPPED + offset);
     }
     const u32 appBytes = OS_KernelConfig->memregion_sz[0];
     if (screen->addr < FCRAM_PHYS || screen->bytes > appBytes) return 0;
@@ -119,17 +126,17 @@ static Handle copy_display(const Screen *screen)
     if (offset > appBytes - screen->bytes) return 0;
     Handle app = open_display_application();
     if (!app) return 0;
+    Handle dma = 0;
     const u32 bases[] = {0x14000000u, 0x30000000u};
     for (unsigned i = 0; i < 2; ++i) {
         if (appBase && appBase != bases[i]) continue;
         const u32 va = bases[i] + offset;
         if (!framebuffer_mapped(app, va, screen->bytes)) continue;
-        if (R_SUCCEEDED(svcStartInterProcessDma(&dma, CUR_PROCESS_HANDLE, (u32)screen->pixels,
-                        app, va, screen->bytes, &config))) {
+        dma = start_display_dma(screen, app, va);
+        if (dma) {
             appBase = bases[i];
             break;
         }
-        dma = 0;
     }
     // The game must remain free to close or switch between any two display copies.
     svcCloseHandle(app);
@@ -156,6 +163,15 @@ static void convert_main(void *unused)
             __atomic_store_n(&s->conversion, ok ? CONVERTED : CONVERT_FAILED, __ATOMIC_RELEASE);
         }
     }
+}
+
+static void defer_retry(Screen *s, u64 now)
+{
+    // A static FCRAM screen may never swap again. Retry the missed capture
+    // once the deadline expires even if the display still uses that buffer.
+    s->captured = 0;
+    s->retryDelayUs = live_capture_retry_us(s->retryDelayUs, live_fps());
+    s->retryAfter = now + (u64)SYSCLOCK_ARM11 * s->retryDelayUs / 1000000u;
 }
 
 static void poll_screen(unsigned index, u64 now)
@@ -198,6 +214,7 @@ static void poll_screen(unsigned index, u64 now)
             svcStopDma(s->dma);
             svcCloseHandle(s->dma);
             s->dma = 0;
+            if (s->captured == s->dmaTick) defer_retry(s, now);
         } else return;
     }
     const ConvertState conversion = __atomic_load_n(&s->conversion, __ATOMIC_ACQUIRE);
@@ -205,6 +222,9 @@ static void poll_screen(unsigned index, u64 now)
     if (conversion == CONVERTED && s->captured == s->dmaTick) {
         s->submittedPts = timestamp(s->dmaTick);
         s->valid = true;
+        s->retryDelayUs = 0;
+    } else if (conversion == CONVERT_FAILED && s->captured == s->dmaTick) {
+        defer_retry(s, now);
     }
     if (conversion != BUFFER_FREE) __atomic_store_n(&s->conversion, BUFFER_FREE, __ATOMIC_RELEASE);
     if (now - s->modeChanged < SYSCLOCK_ARM11 / 5) return;
@@ -228,15 +248,13 @@ static void poll_screen(unsigned index, u64 now)
         }
         s->capacity = size;
     }
-    // Hand the buffer to DMA only after the previous reader has released it.
-    if (R_FAILED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s->pixels, s->bytes))) return;
     s->dma = copy_display(s);
     if (s->dma) {
         s->dmaTick = s->captured = now;
         s->dmaMode = mode;
         s->dmaStride = stride;
         s->pendingChange = false;
-    }
+    } else defer_retry(s, now);
 }
 
 static bool dsp_running(void)
@@ -307,10 +325,13 @@ bool capture_start(void)
     return audioThread != NULL;
 }
 
-void capture_reset(void)
+void capture_invalidate(void)
 {
     appPid = appBase = 0;
     nextAppLookup = 0;
+    live_schedule(0, 0, 0, 0);
+    __atomic_store_n(&audioReset, true, __ATOMIC_RELEASE);
+    const u64 now = svcGetSystemTick();
     for (unsigned i = 0; i < 2; ++i) {
         Screen *s = &screens[i];
         if (s->dma) {
@@ -318,18 +339,30 @@ void capture_reset(void)
             svcCloseHandle(s->dma);
             s->dma = 0;
         }
+        // A pending converter owns pixels, bytes, wide and dma* until it
+        // publishes. Clear the matching capture tick to discard that completion.
+        s->valid = false;
+        s->captured = 0;
+        s->submittedPts = 0;
+        s->retryAfter = 0;
+        s->retryDelayUs = 0;
+        s->pendingChange = false;
+        s->preciseSwap = false;
+        s->lastPoll = 0;
+        s->modeChanged = now;
+    }
+}
+
+void capture_reset(void)
+{
+    capture_invalidate();
+    for (unsigned i = 0; i < 2; ++i) {
+        Screen *s = &screens[i];
         while (__atomic_load_n(&s->conversion, __ATOMIC_ACQUIRE) == CONVERT_PENDING)
             svcSleepThread(1000000);
         __atomic_store_n(&s->conversion, BUFFER_FREE, __ATOMIC_RELEASE);
-        s->valid = false;
-        s->captured = 0;
-        s->retryAfter = 0;
         release_pixels(s);
-        s->pendingChange = false;
-        s->modeChanged = svcGetSystemTick();
     }
-    __atomic_store_n(&audioReset, true, __ATOMIC_RELEASE);
-    live_schedule(0, 0, 0, 0);
 }
 
 void capture_poll(void)

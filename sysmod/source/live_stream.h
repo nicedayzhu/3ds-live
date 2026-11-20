@@ -5,6 +5,8 @@ bool live_requested(void);
 bool live_peer_ready(void);
 /* The paired player has reported new complete video in the last four seconds. */
 bool live_receiver_has_video(void);
+/* Yield the media workers while HOME switches displays; keep the peer and configuration. */
+void live_set_capture_paused(bool paused);
 u32 live_fps(void);
 u32 live_encoded_frames(unsigned screen);
 /* Allocator owns page-backed SYSTEM arenas, freed after live_stop returns. */
