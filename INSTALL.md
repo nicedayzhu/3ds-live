@@ -2,15 +2,17 @@
 
 3DS Live 将 New 3DS、New 3DS XL 或 New 2DS XL 的上下屏和游戏声音传到 Windows x64 电脑。掌机和电脑连接同一路由器，PC 可以用网线。默认端口为 UDP 8001。
 
-## 第一次安装，或从旧版 Recorder / Live 迁移
+## Windows 绿色版
+
+将 ZIP 完整解压到自己选的普通文件夹，双击其中的 `Windows\3DS-Live.exe` 即可运行。播放器和 Qt 运行库一起随包提供。移动播放器时，将它旁边的 `runtime` 文件夹一起移动。
+
+## 首次连接，或从旧版 Recorder / Live 迁移
 
 1. 完整解压发布包。将 **SD 文件夹里面的内容**合并到掌机 SD 卡根目录。复制后应能找到 `/3ds/3ds-live/3ds-live.3dsx` 和 `/luma/sysmodules/0004013000F1D402.cxi`。默认设置已内置，可以直接使用。
 2. 旧版如果开启过 **Launch On Startup**，先在旧控制程序关闭它，再完整重启掌机。旧模块与独立版使用相同的直播快捷键。原来的 SD 录像可以保留。
 3. 按住 **SELECT** 开机，在已安装的 Luma3DS 配置中勾选 **Enable loading external FIRMs and modules**，按 **START** 保存。每次开机后，在 Homebrew Launcher 打开一次 **3DS Live**。出现就绪提示后按 **START** 退出，进入游戏。
-4. 打开电脑上的 **Windows/3DS-Live.exe**，保留旁边的 `runtime` 文件夹。如果 Windows 弹出防火墙提示，允许它在当前专用网络上通信。
+4. 打开解压目录里的 **Windows/3DS-Live.exe**。如果 Windows 弹出防火墙提示，允许它在当前专用网络上通信。
 5. 在游戏里按 **R + SELECT** 开始投屏，再按一次停止。也可以先按掌机热键，再打开播放器。连接建立后，窗口会显示上下屏和源帧率。
-
-在 Windows 上长期使用时，可将发布包的 `Windows` 文件夹完整复制到 `%LOCALAPPDATA%\Programs\3DS Live`，再从该目录启动 `3DS-Live.exe` 或为它创建开始菜单快捷方式。本机编译产物放在低完整性工作目录时，Windows 外壳可能在每次双击时显示“打开文件 - 安全警告”。
 
 ## 更换 Wi-Fi 或 IP
 
