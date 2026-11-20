@@ -33,6 +33,6 @@
 | `live/qt/` | Qt/C++ 接收、播放、画质增强、诊断、RTSP 和 PC 端 MP4 输出 |
 | `live/tests/native/` | 主机可执行的 C 测试 |
 
-默认每秒探测一次，连续约四秒未确认就重新寻找播放器。掌机只广播发现请求，音视频发往选中的单个 PC。[协议说明](live/docs/PROTOCOL.md)
+双方等待连接时每秒探测一次，PC 向掌机的 UDP 8002 发送邀请，掌机向 PC 的媒体端口（默认 UDP 8001）发送发现请求。连续约四秒未确认就重新寻找播放器。音视频发往选中的单个 PC。[协议说明](live/docs/PROTOCOL.md)
 
 本项目从 `3ds-recorder` 的 Live 分支提交 `927f4ece60f3bae64d6a35d32104e78f50a07308` 提取。JPEG 编码器使用随源附带的 JPEGENC 修订 `f51421bdaba8e098dc82130a17adaae6d61c3377`。原作者许可和 PC 运行库声明一并保留。[项目许可](LICENSE) · [JPEGENC 许可](third_party/JPEGENC/LICENSE) · [模型许可](third_party/PCEnhance/README.md) · [Qt 运行库声明](live/qt/licenses/NOTICE.txt)

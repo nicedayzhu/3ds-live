@@ -4,7 +4,9 @@ The New 3DS sends dual-screen JPEGs, stereo game audio and device status to the 
 
 ## LAN discovery
 
-The handheld binds a wildcard IPv4 UDP socket on an ephemeral source port. In automatic mode it transmits a probe approximately once per second to the subnet broadcast address and configured PC port. The same socket carries the subsequent unicast stream and receives replies.
+In automatic mode the handheld listens on UDP 8002 when available. If the port is occupied, it continues with an ephemeral source port. While searching, it sends a probe approximately once per second to the configured PC port using the subnet broadcast address when known and the limited broadcast address. The same socket receives replies and carries the subsequent unicast stream.
+
+While waiting for a peer, the PC also sends an eight-byte invitation from its bound media port to UDP 8002. The invitation consists of `3DLP` followed by a little-endian uint32 version of 1. An unpaired handheld responds with its regular probe by unicast to the inviting PC. Both discovery directions then use the same exchange below.
 
 | Offset | Length | Probe from handheld | Response from PC |
 | --- | --- | --- | --- |

@@ -45,6 +45,11 @@ int main(void) {
     const uint32_t local=0xc0a80101u, mask=0xffffff00u;
     assert(!live_peer_address(first_pc,0,mask));
     assert(!live_peer_address(first_pc,local,0));
+    assert(live_reply_address(first_pc,local,0));
+    assert(live_reply_address(first_pc,0,0));
+    assert(!live_reply_address(0xffffffffu,0,0));
+    assert(!live_reply_address(local,local,0));
+    assert(!live_reply_address(0xc0a801ffu,local,mask));
     assert(!live_peer_address(local,local,mask));
     assert(!live_peer_address(0xc0a80100u,local,mask));
     assert(!live_peer_address(0xc0a801ffu,local,mask));
@@ -64,5 +69,19 @@ int main(void) {
     assert(live_config_port("9000x")==0);
     assert(live_config_port("-1")==0);
     assert(live_config_port("")==0);
+
+    uint8_t invitation[]={'3','D','L','P',1,0,0,0};
+    assert(live_discover_invitation(invitation,sizeof invitation));
+    assert(!live_discover_invitation(invitation,sizeof invitation-1));
+    invitation[4]=2;
+    assert(!live_discover_invitation(invitation,sizeof invitation));
+    uint8_t invited[LIVE_DISCOVERY_BYTES];
+    discovery=(LiveDiscovery){0};
+    live_discover_invited_probe(&discovery,session,probe);
+    assert(discovery.outstanding&&discovery.challenge!=0);
+    live_discover_invited_probe(&discovery,session,invited);
+    assert(memcmp(probe,invited,sizeof invited)==0);
+    live_discover_probe(&discovery,session,probe);
+    assert(memcmp(probe,invited,sizeof invited)!=0);
     return 0;
 }

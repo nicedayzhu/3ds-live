@@ -56,7 +56,7 @@ static int checkRifePreferences() {
             }
         });
         QTimer::singleShot(200, &app, &QApplication::quit);
-        if (runClient(app) != 0 || !loaded) return 3;
+        if (runClient(app, 0) != 0 || !loaded) return 3;
     }
     return 0;
 }
@@ -91,7 +91,7 @@ static int checkReceiverHandover(int argc, char **argv) {
     };
     live::Timeline timeline(100);
     live::Pipeline pipeline(timeline, {}, 1, "off", "off");
-    live::Receiver receiver(timeline, pipeline, {}, port, 30, 800000);
+    live::Receiver receiver(timeline, pipeline, {}, port, 30, 800000, 0);
     if (!QTest::qWaitFor([&]{ return receiver.stats()["udp_port"].toInt() == port; }, 2000))
         return 2;
     if (!awaitControl(first, 1000)) return 2;
@@ -224,7 +224,7 @@ static int checkDiscovery(int argc, char **argv) {
         return false;
     };
     {
-        live::Receiver receiver(timeline, pipeline, {}, port, 30, 800000);
+        live::Receiver receiver(timeline, pipeline, {}, port, 30, 800000, 0);
         if (!listening(receiver) || !discover(first)) return 2;
         if (!exchange(first, probe + 'x', 100).isEmpty()) return 3;
         if (!exchange(second, probe, 100).isEmpty()) return 4;
@@ -240,9 +240,19 @@ static int checkDiscovery(int argc, char **argv) {
         QTest::qWait(4100);
         if (!discover(second)) return 7;
     }
-    live::Receiver pinned(timeline, pipeline, local, port, 30, 800000);
-    if (!first.bind(local, 0) || !listening(pinned) || !discover(first)) return 8;
-    QTest::qWait(4100);
+    // Emulate the handheld locator on loopback. No test sends LAN broadcasts.
+    QUdpSocket locator;
+    if (!locator.bind(local, 0)) return 11;
+    live::Receiver pinned(timeline, pipeline, local, port, 30, 800000, locator.localPort());
+    auto receivedLocate = [&](int timeout) {
+        if (!locator.hasPendingDatagrams() && !locator.waitForReadyRead(timeout)) return false;
+        const auto packet = locator.receiveDatagram();
+        return packet.senderPort() == port && packet.senderAddress().toIPv4Address() == local.toIPv4Address() &&
+               packet.data() == QByteArray::fromHex("33444c5001000000");
+    };
+    if (!first.bind(local, 0) || !listening(pinned) || !receivedLocate(1500) || !discover(first)) return 8;
+    if (locator.waitForReadyRead(1300)) return 12;
+    if (!receivedLocate(4000)) return 13;
     return exchange(second, probe, 200).isEmpty() ? 0 : 9;
 }
 
@@ -400,7 +410,7 @@ int main(int testArgc, char **testArgv) {
         }
     });
     QTimer::singleShot(10300, [&] { if (view) view->close(); });
-    if (runClient(app))
+    if (runClient(app, 0))
         return 3;
     QFile saved(work.filePath("frozen.json"));
     if (!saved.open(QIODevice::ReadOnly)) return 6;

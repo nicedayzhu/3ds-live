@@ -7,7 +7,7 @@ class Receiver {
     Timeline &timeline;
     Pipeline &pipeline;
     QHostAddress sender;
-    quint16 port;
+    quint16 port, handheldDiscoveryPort;
     std::atomic<bool> stop{false};
     std::atomic<qint64> lastPairUs{0}, lastPacketUs{0}, lastTopUs{0};
     std::thread worker;
@@ -17,7 +17,8 @@ class Receiver {
     void run();
 
   public:
-    Receiver(Timeline &timeline, Pipeline &pipeline, QHostAddress sender, quint16 port, int fps, int rate);
+    Receiver(Timeline &timeline, Pipeline &pipeline, QHostAddress sender, quint16 port, int fps, int rate,
+             quint16 handheldDiscoveryPort);
     ~Receiver();
     void configure(int fps, int rate);
     QJsonObject stats();

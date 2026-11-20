@@ -1,6 +1,9 @@
 #include "receiver.h"
 #include "live_jpeg_wire.h"
 #include "wlan_stream.h"
+#include <QNetworkDatagram>
+#include <QNetworkInterface>
+#include <QSettings>
 #include <QtEndian>
 #include <QUdpSocket>
 #ifdef Q_OS_WIN
@@ -13,8 +16,47 @@ const QList<int> &rates() {
                                      1000000, 1200000, 1400000, 1600000, 1800000, 2000000};
     return steps;
 }
-Receiver::Receiver(Timeline &t, Pipeline &p, QHostAddress ip, quint16 udp, int hz, int cap)
-    : timeline(t), pipeline(p), sender(ip), port(udp), requestedFps(hz), requestedRate(cap) {
+static int locateHandheld(QUdpSocket &socket, quint16 discoveryPort, const QHostAddress &pinned,
+                          const QHostAddress &hint) {
+    static const auto probe = message("3DLP", {1});
+    if (!pinned.isNull())
+        return socket.writeDatagram(probe, pinned, discoveryPort) == probe.size();
+
+    int sent = 0;
+    for (const auto &interface : QNetworkInterface::allInterfaces()) {
+        const auto flags = interface.flags();
+        if (!flags.testFlag(QNetworkInterface::IsUp) || !flags.testFlag(QNetworkInterface::IsRunning) ||
+            !flags.testFlag(QNetworkInterface::CanBroadcast) || flags.testFlag(QNetworkInterface::IsLoopBack) ||
+            flags.testFlag(QNetworkInterface::IsPointToPoint))
+            continue;
+        QSet<QHostAddress> destinations;
+        for (const auto &entry : interface.addressEntries()) {
+            const auto local = entry.ip();
+            const int prefix = entry.prefixLength();
+            if (local.protocol() != QAbstractSocket::IPv4Protocol || prefix < 1 || prefix > 30)
+                continue;
+            const auto broadcast = entry.broadcast();
+            if (broadcast.isNull() || broadcast == QHostAddress::Broadcast) continue;
+            auto send = [&](const QHostAddress &address) {
+                if (destinations.contains(address)) return;
+                destinations.insert(address);
+                QNetworkDatagram packet(probe, address, discoveryPort);
+                packet.setInterfaceIndex(interface.index());
+                packet.setSender(local, socket.localPort());
+                if (socket.writeDatagram(packet) == probe.size()) ++sent;
+            };
+            send(broadcast);
+            // A previous session can expedite recovery on a LAN that suppresses broadcasts.
+            // Never direct a remembered hint through the gateway after switching networks.
+            if (!hint.isNull() && hint != local && hint != broadcast && hint.isInSubnet(local, prefix))
+                send(hint);
+        }
+    }
+    return sent;
+}
+Receiver::Receiver(Timeline &t, Pipeline &p, QHostAddress ip, quint16 udp, int hz, int cap, quint16 lookupPort)
+    : timeline(t), pipeline(p), sender(ip), port(udp), handheldDiscoveryPort(lookupPort),
+      requestedFps(hz), requestedRate(cap) {
     worker = std::thread(&Receiver::run, this);
 }
 Receiver::~Receiver() {
@@ -61,6 +103,12 @@ void Receiver::run() {
     QHostAddress peer;
     quint16 remote = 0;
     QHostAddress discovered;
+    QSettings prefs;
+    QHostAddress hint;
+    if (handheldDiscoveryPort && sender.isNull())
+        hint.setAddress(prefs.value("lastDiscoveredHandheld").toString());
+    qint64 nextLocate = 0;
+    int locateSent = 0;
     quint16 discoveryPort = 0;
     quint32 discoverySession = 0;
     qint64 discoveryUntil = 0;
@@ -96,10 +144,12 @@ void Receiver::run() {
     assembler.onPanels = [&](Pair update) {
         const auto now = clockUs();
         int panelMask = 0;
+        bool verifiedJpeg = false;
         for (int i = 0; i < 2; ++i) {
             const auto &wire = update.screens[i];
             if (wire.isEmpty()) continue;
             if (wire.startsWith("\xff\xd8")) {
+                verifiedJpeg |= wire.endsWith("\xff\xd9");
                 jpegWireBytes += wire.size();
                 ++fullJpegScreens;
             } else if (wire.size() >= LIVE_JPEG_WIRE_HEADER_SIZE + 3 &&
@@ -108,6 +158,7 @@ void Receiver::run() {
                        wire.endsWith("\xff\xd9")) {
                 const int quality = uchar(wire[5]);
                 if (quality >= 1 && quality <= 95) {
+                    verifiedJpeg = true;
                     update.jpegQuality[i] = quality;
                     qualitySum[i] += quality;
                     ++qualityCount[i];
@@ -128,6 +179,10 @@ void Receiver::run() {
             panelMask |= 1 << i;
         }
         if (!panelMask) return;
+        if (verifiedJpeg && handheldDiscoveryPort && sender.isNull() && !peer.isLoopback() && peer != hint) {
+            hint = peer;
+            prefs.setValue("lastDiscoveredHandheld", hint.toString());
+        }
         auto source = timeline.arrival(update.session, update.seq, update.pts, now, panelMask, update.bottomPts);
         if (panelMask & 1) {
             const auto previous = lastTopUs.exchange(now);
@@ -351,6 +406,11 @@ void Receiver::run() {
         }
         deliver();
         auto now = clockUs();
+        if (handheldDiscoveryPort && now >= nextLocate && now >= discoveryUntil &&
+            (!lastSeen || now - lastSeen >= 4000000)) {
+            locateSent += locateHandheld(socket, handheldDiscoveryPort, sender, hint);
+            nextLocate = now + 1000000;
+        }
         assembler.expire(now);
         if (revision != seenRevision) {
             seenRevision = revision;
@@ -449,6 +509,7 @@ void Receiver::run() {
         report["wlan_streaming"] = wlan.enabled.load();
         report["wlan_streaming_error"] = qint64(wlan.error.load());
         report["peer"] = peer.toString();
+        report["discovery_queries_sent"] = locateSent;
         report["peer_changes"] = peerChanges;
         report["session"] = qint64(current.value_or(0));
         report["pairs"] = c.fullPairs;

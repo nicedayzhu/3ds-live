@@ -49,7 +49,7 @@ static bool validIp(const QString &ip) {
 static bool validRtsp(const QString &url) {
     return url.isEmpty() || (QUrl(url).scheme() == "rtsp" && !QUrl(url).host().isEmpty());
 }
-int runClient(QApplication &app) {
+int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     configureOpenCV();
     app.setApplicationVersion(LIVE_VERSION);
     app.setOrganizationName("3ds-live");
@@ -167,7 +167,8 @@ int runClient(QApplication &app) {
     std::unique_ptr<Receiver> receiver;
     auto listen = [&] {
         receiver.reset();
-        receiver = std::make_unique<Receiver>(timeline, pipeline, QHostAddress(o.ip), o.port, o.fps, o.rate);
+        receiver = std::make_unique<Receiver>(timeline, pipeline, QHostAddress(o.ip), o.port, o.fps, o.rate,
+                                              handheldDiscoveryPort);
     };
     listen();
     QJsonObject modes;

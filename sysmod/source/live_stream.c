@@ -39,6 +39,12 @@ static LiveDiscovery discovery;
 static bool automaticHost,mediaReady;
 static u64 lastProbeTick;
 static u32 localAddress,localMask;
+static struct {
+    u32 polls,probeAttempts,probesSent,replies,accepted,hints,hintsAnswered,reportedBroadcast,lastDestination;
+    int infoResult,infoErrno,socketErrno,bindErrno,sendErrno,receiveErrno;
+    unsigned localPort;
+    u64 savedAt,lastHintTick;
+} netDiag;
 static u32 fps=30,rate=800000,configEpoch,configSequence;
 static unsigned quality=60,spare;
 static LivePayloadControl payloadControl;
@@ -295,56 +301,120 @@ static void send_audio(u64 *due) {
     /* Retain even after a failed send: the next packet gets one more chance. */
     memcpy(audioPrevious,fresh,count*LIVE_AUDIO_RECORD_BYTES);audioPreviousCount=count;audioPreviousTick=begin;
 }
-/* A wildcard local address lets SOC route through the current Wi-Fi address.
- * libctru defines SO_BROADCAST as zero because SOC permits broadcasts by default. */
+static const char *format_address(u32 address,char *out) {
+    struct in_addr ip={.s_addr=htonl(address)};
+    return inet_ntop(AF_INET,&ip,out,INET_ADDRSTRLEN)?out:"?";
+}
+
+static void network_report(FILE *f) {
+    char local[INET_ADDRSTRLEN],mask[INET_ADDRSTRLEN],destination[INET_ADDRSTRLEN],peer[INET_ADDRSTRLEN];
+    fprintf(f,"session=%08lx\nautomatic=%u\npeer_ready=%u\nnetwork_polls=%lu\n"
+            "local=%s\nmask=%s\nlast_probe_destination=%s\npeer=%s\nlocal_port=%u\nmedia_port=%u\n",
+            session,automaticHost,mediaReady,netDiag.polls,format_address(localAddress,local),
+            format_address(localMask,mask),format_address(netDiag.lastDestination,destination),
+            format_address(ntohl(target.sin_addr.s_addr),peer),netDiag.localPort,ntohs(target.sin_port));
+    fprintf(f,"ip_info_result=%d\nip_info_errno=%d\nsocket_errno=%d\nbind_errno=%d\n"
+            "probe_attempts=%lu\nprobes_sent=%lu\nprobe_errno=%d\nreceive_errno=%d\n"
+            "received_datagrams=%lu\naccepted_replies=%lu\ninvites=%lu\ninvites_answered=%lu\n",
+            netDiag.infoResult,netDiag.infoErrno,netDiag.socketErrno,netDiag.bindErrno,netDiag.probeAttempts,
+            netDiag.probesSent,netDiag.sendErrno,netDiag.receiveErrno,netDiag.replies,netDiag.accepted,
+            netDiag.hints,netDiag.hintsAnswered);
+}
+
+static void save_network_report(void) {
+    FILE *f=fopen("sdmc:/3ds/3ds-live/network-status.txt","w");
+    if(f){network_report(f);fclose(f);}
+    netDiag.savedAt=svcGetSystemTick();
+}
+
+/* A fixed port receives invitations from PCs that can broadcast to the console.
+ * If occupied, the first outgoing probe still obtains an ephemeral source port. */
 static int open_stream_socket(void) {
     int sock=socket(AF_INET,SOCK_DGRAM,0);
+    netDiag.socketErrno=sock<0?errno:0;
     if(sock<0)return -1;
-    struct sockaddr_in local={.sin_family=AF_INET};
-    if(fcntl(sock,F_SETFL,O_NONBLOCK)<0||
-       bind(sock,(struct sockaddr*)&local,sizeof local)<0) {
+    struct sockaddr_in local={.sin_family=AF_INET,.sin_port=htons(automaticHost?LIVE_DISCOVERY_PORT:0)};
+    if(fcntl(sock,F_SETFL,O_NONBLOCK)<0) {
+        netDiag.socketErrno=errno;
         close(sock);
         return -1;
     }
+    netDiag.bindErrno=bind(sock,(struct sockaddr*)&local,sizeof local)<0?errno:0;
+    if(!netDiag.bindErrno)netDiag.localPort=ntohs(local.sin_port);
     return sock;
+}
+
+static bool send_discovery_probe(const u8 *probe,u32 address) {
+    struct sockaddr_in destination=target;
+    destination.sin_addr.s_addr=htonl(address);
+    netDiag.lastDestination=address;
+    netDiag.probeAttempts++;
+    int sent=sendto(fd,probe,LIVE_DISCOVERY_BYTES,0,(struct sockaddr*)&destination,sizeof destination);
+    if(sent!=LIVE_DISCOVERY_BYTES){netDiag.sendErrno=errno;return false;}
+    netDiag.probesSent++;
+    netDiag.sendErrno=0;
+    if(!netDiag.localPort) {
+        struct sockaddr_in local={0};socklen_t size=sizeof local;
+        if(getsockname(fd,(struct sockaddr*)&local,&size)==0)netDiag.localPort=ntohs(local.sin_port);
+    }
+    return true;
 }
 
 static void poll_discovery(u64 now) {
     bool expired=live_discover_expire(&discovery,now,SYSCLOCK_ARM11);
     if(!expired&&lastProbeTick&&now-lastProbeTick<SYSCLOCK_ARM11)return;
     lastProbeTick=now;
+    netDiag.polls++;
+    if(fd<0)fd=open_stream_socket();
     struct in_addr ip={0},mask={0},broadcast={0};
-    bool haveNetwork=SOCU_GetIPInfo(&ip,&mask,&broadcast)==0&&ip.s_addr&&mask.s_addr;
-    u32 address=haveNetwork?ntohl(ip.s_addr):0;
-    u32 netmask=haveNetwork?ntohl(mask.s_addr):0;
-    if(expired||address!=localAddress||netmask!=localMask) {
+    netDiag.infoResult=SOCU_GetIPInfo(&ip,&mask,&broadcast);
+    netDiag.infoErrno=netDiag.infoResult?errno:0;
+    if(!ip.s_addr) {
+        long host=gethostid();
+        if(host!=-1)ip.s_addr=(u32)host;
+    }
+    u32 address=ntohl(ip.s_addr),netmask=ntohl(mask.s_addr);
+    bool moved=address&&localAddress&&(address!=localAddress||(netmask&&localMask&&netmask!=localMask));
+    if(expired||moved) {
         __atomic_store_n(&mediaReady,false,__ATOMIC_RELEASE);
-        localAddress=address;
-        localMask=netmask;
         discovery.peer=0;
         discovery.outstanding=false;
         if(automaticHost)target.sin_addr.s_addr=0;
         configSequence=0;
         audioPreviousCount=0;
         if(fd>=0){close(fd);fd=-1;}
+        netDiag.localPort=0;
+        fd=open_stream_socket();
     }
-    if(!haveNetwork)return;
-    if(!automaticHost&&!live_peer_address(ntohl(target.sin_addr.s_addr),localAddress,localMask))
-        return;
-    if(fd<0)fd=open_stream_socket();
+    if(address) {
+        if(address!=localAddress||netmask)localMask=netmask;
+        localAddress=address;
+    }
+    netDiag.reportedBroadcast=ntohl(broadcast.s_addr);
+    if(!mediaReady&&(netDiag.polls==2||now-netDiag.savedAt>=5ull*SYSCLOCK_ARM11))save_network_report();
     if(fd<0)return;
     if(!automaticHost) {
-        __atomic_store_n(&mediaReady,true,__ATOMIC_RELEASE);
+        bool usable=live_peer_address(ntohl(target.sin_addr.s_addr),localAddress,localMask);
+        __atomic_store_n(&mediaReady,usable,__ATOMIC_RELEASE);
         return;
     }
-    struct sockaddr_in destination=target;
-    if(!discovery.peer)
-        destination.sin_addr.s_addr=htonl(live_broadcast_address(localAddress,localMask));
     u8 probe[LIVE_DISCOVERY_BYTES];
     live_discover_probe(&discovery,session,probe);
-    if(sendto(fd,probe,sizeof probe,0,(struct sockaddr*)&destination,sizeof destination)!=(int)sizeof probe) {
+    bool sent;
+    if(discovery.peer)sent=send_discovery_probe(probe,discovery.peer);
+    else {
+        /* Routers and SOC implementations differ in handling subnet vs limited
+         * broadcast. Both probes share one challenge and expose no media. */
+        u32 subnet=netDiag.reportedBroadcast;
+        if(!subnet&&localAddress&&localMask)subnet=live_broadcast_address(localAddress,localMask);
+        sent=subnet&&subnet!=UINT32_MAX&&send_discovery_probe(probe,subnet);
+        if(send_discovery_probe(probe,UINT32_MAX))sent=true;
+    }
+    if(!sent) {
         discovery.outstanding=false;
-        if(!discovery.peer){close(fd);fd=-1;}
+        /* Even if SOC refuses outbound broadcasts, the fixed listener must
+         * stay open so a PC invitation can initiate the unicast handshake. */
+        if(!discovery.peer&&netDiag.bindErrno){close(fd);fd=-1;netDiag.localPort=0;}
     }
 }
 
@@ -356,17 +426,37 @@ static void control(u64 *due) {
         lastControlTick=now;
         for(unsigned i=0;i<4;i++) {
             u8 msg[64];struct sockaddr_in from;socklen_t size=sizeof from;
-            int n=recvfrom(fd,msg,sizeof msg,0,(struct sockaddr*)&from,&size);if(n<0)break;
-            if(size<sizeof from||from.sin_family!=AF_INET||from.sin_port!=target.sin_port||
-               n<8||get32(msg+4)!=session)continue;
+            int n=recvfrom(fd,msg,sizeof msg,0,(struct sockaddr*)&from,&size);
+            if(n<0) {
+                if(errno!=EAGAIN&&errno!=EWOULDBLOCK)netDiag.receiveErrno=errno;
+                break;
+            }
+            netDiag.replies++;
+            if(size<sizeof from||from.sin_family!=AF_INET||from.sin_port!=target.sin_port)continue;
+            if(automaticHost&&!discovery.peer&&live_discover_invitation(msg,(size_t)n)) {
+                u32 address=ntohl(from.sin_addr.s_addr);
+                if(!live_reply_address(address,localAddress,localMask)||address==netDiag.reportedBroadcast)continue;
+                netDiag.hints++;
+                if(netDiag.lastHintTick&&now-netDiag.lastHintTick<SYSCLOCK_ARM11/5)continue;
+                netDiag.lastHintTick=now;
+                u8 probe[LIVE_DISCOVERY_BYTES];
+                live_discover_invited_probe(&discovery,session,probe);
+                if(send_discovery_probe(probe,address))netDiag.hintsAnswered++;
+                continue;
+            }
+            if(n<8||get32(msg+4)!=session)continue;
             if(automaticHost&&n>=4&&!memcmp(msg,"3DLA",4)) {
                 bool first=!discovery.peer;
                 u32 address=ntohl(from.sin_addr.s_addr);
-                if(live_peer_address(address,localAddress,localMask)&&
-                   live_discover_ack(&discovery,address,session,msg,(size_t)n,now)&&first) {
-                    target.sin_addr=from.sin_addr;
-                    lastStatusTick=0;
-                    __atomic_store_n(&mediaReady,true,__ATOMIC_RELEASE);
+                if(live_reply_address(address,localAddress,localMask)&&address!=netDiag.reportedBroadcast&&
+                   live_discover_ack(&discovery,address,session,msg,(size_t)n,now)) {
+                    netDiag.accepted++;
+                    if(first) {
+                        target.sin_addr=from.sin_addr;
+                        lastStatusTick=0;
+                        __atomic_store_n(&mediaReady,true,__ATOMIC_RELEASE);
+                        save_network_report();
+                    }
                 }
                 continue;
             }
@@ -503,7 +593,9 @@ Result live_start(void *(*allocate)(u32 bytes)) {
     discovery=(LiveDiscovery){.challenge=(u32)(started>>16)};
     lastProbeTick=0;
     localAddress=localMask=0;
+    memset(&netDiag,0,sizeof netDiag);
     __atomic_store_n(&mediaReady,false,__ATOMIC_RELEASE);
+    save_network_report();
     for(unsigned i=0;i<2;i++) {
         live_jpeg_reset(i);rawBytes[i]=live_jpeg_frame_size(i?320:400);
         size_t sourceBytes=live_jpeg_source_storage_size(i?320:400);
@@ -538,6 +630,7 @@ void live_stop(void) {
         rawWorking[i]=NULL; /* Caller releases the complete SYSTEM arena. */
     }
     FILE *f=fopen("sdmc:/3ds/3ds-live/live-stats.txt","w");if(!f)return;
+    network_report(f);
 #ifdef LIVE_FRAME_TIMING
     fprintf(f,"timing_session=%08lx\ntiming_saved=%u\n",(unsigned long)session,timingSaved?1u:0u);
 #endif
