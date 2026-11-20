@@ -3,10 +3,15 @@
 #include <QtWidgets>
 #include <algorithm>
 #include <utility>
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <imm.h>
+#endif
 namespace {
 class Canvas final : public QWidget {
     QSize sourceSize;
     QImage image;
+    std::function<void()> onPainted;
     QElapsedTimer submitClock;
     qint64 paintedChanges = 0, coalesced = 0, maxPaintNs = 0;
 
@@ -28,11 +33,12 @@ class Canvas final : public QWidget {
         sourceSize = size;
         updateGeometry();
     }
-    void setImage(const QImage &frame) {
+    void setImage(const QImage &frame, std::function<void()> painted) {
         if (submitClock.isValid())
             ++coalesced;
         submitClock.start();
         image = frame;
+        onPainted = std::move(painted);
         update();
     }
     QJsonObject paintStats() {
@@ -62,6 +68,7 @@ class Canvas final : public QWidget {
         if (image.isNull()) {
             p.fillRect(rect(), Qt::black);
             submitClock.invalidate();
+            onPainted = {};
             return;
         }
         QSize sz = image.size().scaled(size(), Qt::KeepAspectRatio);
@@ -74,6 +81,11 @@ class Canvas final : public QWidget {
             ++paintedChanges;
             maxPaintNs = std::max(maxPaintNs, submitClock.nsecsElapsed());
             submitClock.invalidate();
+            if (onPainted) {
+                p.end();
+                auto notify = std::move(onPainted);
+                notify();
+            }
         }
     }
 };
@@ -129,6 +141,7 @@ class Viewer final : public QWidget {
     QMap<QString, QAction *> pictures, motionChoices;
     QPointer<QFileDialog> saveDialog;
     live::DebugWindow *debug = nullptr;
+    bool activateAfterFirstPaint = false;
     QJsonObject snapshot;
     QJsonArray history, queue;
     QString lastFile;
@@ -613,7 +626,22 @@ class Viewer final : public QWidget {
         }
         setMinimumSize(240, 180);
         fitCanvas(size);
+        canvas->message(o["notice"].toString());
+#ifdef Q_OS_WIN
+        if (QGuiApplication::platformName() == QStringLiteral("windows")) {
+            // This top-level window is a viewer. Text entry lives in separate
+            // settings and save dialogs, which keep their own input contexts.
+            setAttribute(Qt::WA_ShowWithoutActivating);
+            ImmAssociateContext(reinterpret_cast<HWND>(winId()), nullptr);
+            STARTUPINFOW startup{};
+            GetStartupInfoW(&startup);
+            activateAfterFirstPaint = !(startup.dwFlags & STARTF_USESHOWWINDOW) ||
+                (startup.wShowWindow != SW_HIDE && startup.wShowWindow != SW_SHOWNOACTIVATE &&
+                 startup.wShowWindow != SW_SHOWNA && startup.wShowWindow != SW_SHOWMINNOACTIVE);
+        }
+#endif
         show();
+        setAttribute(Qt::WA_ShowWithoutActivating, false);
         if (o["debug"].toBool())
             QTimer::singleShot(0, this, [this] { showDebug(); });
     }
@@ -634,7 +662,7 @@ class Viewer final : public QWidget {
         canvas->setSourceSize(target);
         if (!isMaximized() && !isFullScreen()) fitCanvas(target);
     }
-    void setImage(const QImage &im) { canvas->setImage(im); }
+    void setImage(const QImage &im, std::function<void()> painted) { canvas->setImage(im, std::move(painted)); }
     QJsonObject paintStats() { return canvas->paintStats(); }
     QJsonArray pullEvents() { return std::exchange(queue, QJsonArray{}); }
     void receive(const QJsonObject &v) {
@@ -711,6 +739,16 @@ class Viewer final : public QWidget {
         arrangeBar(e->size().width());
     }
     bool eventFilter(QObject *obj, QEvent *e) override {
+        if (activateAfterFirstPaint && obj == canvas && e->type() == QEvent::Paint) {
+            // Windows can call third-party text services synchronously on
+            // activation. Finish this backing-store paint before requesting focus.
+            activateAfterFirstPaint = false;
+            QMetaObject::invokeMethod(this, [this] {
+                auto *active = QApplication::activeWindow();
+                if (isVisible() && !isMinimized() && !active && !QApplication::activePopupWidget())
+                    activateWindow();
+            }, Qt::QueuedConnection);
+        }
         if (performance && obj == performance) {
             if (e->type() == QEvent::Enter || e->type() == QEvent::FocusIn) showCard(true);
             if (e->type() == QEvent::Leave || e->type() == QEvent::FocusOut || e->type() == QEvent::Hide)
@@ -745,8 +783,8 @@ void destroyView(void *v) {
 QJsonArray takeEvents(void *v) {
     return static_cast<Viewer *>(v)->pullEvents();
 }
-void showFrame(void *v, const QImage &im) {
-    static_cast<Viewer *>(v)->setImage(im);
+void showFrame(void *v, const QImage &im, std::function<void()> onPainted) {
+    static_cast<Viewer *>(v)->setImage(im, std::move(onPainted));
 }
 QJsonObject takePaintStats(void *v) {
     return static_cast<Viewer *>(v)->paintStats();

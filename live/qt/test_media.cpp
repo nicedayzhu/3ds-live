@@ -170,6 +170,82 @@ class MediaTests : public QObject {
         const QList<qint64> expected{0, -12000, -8000, 0, 0};
         QCOMPARE(phase, expected);
     }
+    void rawPlayoutAcrossRepeatedCaptureStamps() {
+        Timeline timeline(100);
+        timeline.reset(7);
+        QImage image(8, 8, QImage::Format_RGB888);
+        image.fill(Qt::green);
+        // The playhead is 95 ms past the first capture. The next real top
+        // is already decoded, but its nominal timestamp is still 39 ms away.
+        const qint64 origin = clockUs() - timeline.delay - 95000;
+        auto put = [&](quint32 sequence, quint32 pts) {
+            auto source = timeline.arrival(7, sequence, pts, origin + pts, 1);
+            timeline.put(source, image, {}, false, 30);
+            return source;
+        };
+        put(134, 0);
+        const auto first = timeline.present();
+        QCOMPARE(first.source.sequence, 134u);
+        for (quint32 seq = 135; seq < 138; ++seq) {
+            put(seq, 0);
+            QCOMPARE(timeline.present().id, first.id);
+        }
+        const auto source = put(138, 133709);
+        const auto next = timeline.present();
+        QCOMPARE(next.source.sequence, 138u);
+        QCOMPARE(next.updatedPanels, 1);
+        QVERIFY(!next.synthetic);
+        QCOMPARE(timeline.deadline(source), origin + timeline.delay + 133709);
+    }
+    void rawGapRecoveryRespectsBufferAndReturnsToClock() {
+        for (const int delayMs : {20, 100}) {
+            Timeline timeline(delayMs);
+            timeline.reset(7);
+            const auto origin = clockUs() - 3000000;
+            QImage image(8, 8, QImage::Format_RGB888);
+            image.fill(Qt::blue);
+            QList<qint64> phase;
+            quint64 cursor = 0;
+            for (quint32 pts : {0u, 33333u, 167042u, 200375u, 233708u, 1267042u}) {
+                auto source = timeline.arrival(7, pts, pts, origin + pts);
+                timeline.put(source, image, {}, false, 30);
+                QCOMPARE(timeline.present().source.pts, qint64(pts));
+                for (const auto &event : timeline.diagnostics.since(cursor, clockUs()))
+                    if (QLatin1String(event.kind) == QLatin1String("select"))
+                        phase.append(event.target - timeline.deadline(source));
+            }
+            QCOMPARE(phase.size(), 6);
+            QCOMPARE(phase[0], 0);
+            QCOMPARE(phase[1], 0);
+            if (delayMs == 100)
+                QVERIFY(phase[2] >= -45000 && phase[2] <= -35000);
+            else
+                QCOMPARE(phase[2], -10000);
+            QVERIFY(phase[2] < phase[3] && phase[3] < phase[4] && phase[4] < 0);
+            QCOMPARE(phase[5], 0);
+        }
+    }
+    void successiveCaptureGapsSharePlayoutBuffer() {
+        Timeline timeline(100);
+        timeline.reset(7);
+        const auto origin = clockUs() - 1000000;
+        QImage image(8, 8, QImage::Format_RGB888);
+        image.fill(Qt::blue);
+        QList<qint64> targets;
+        quint64 cursor = 0;
+        for (quint32 pts : {0u, 100282u, 217278u}) {
+            auto source = timeline.arrival(7, pts, pts, origin + pts);
+            timeline.put(source, image, {}, false, 30);
+            QCOMPARE(timeline.present().source.pts, qint64(pts));
+            for (const auto &event : timeline.diagnostics.since(cursor, clockUs()))
+                if (QLatin1String(event.kind) == QLatin1String("select"))
+                    targets.append(event.target);
+        }
+        QCOMPARE(targets.size(), 3);
+        QVERIFY(targets[1] - targets[0] >= 80000);
+        QVERIFY(targets[1] - targets[0] < 100000);
+        QVERIFY(targets[2] - targets[1] < 100000);
+    }
     void restoredPacingAcrossMissingFrames() {
         Timeline timeline(160);
         timeline.setPictureMode("fbcnn");

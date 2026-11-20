@@ -1,12 +1,14 @@
 [CmdletBinding()]
-param()
+param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $repo 'dist'
 $windows = Join-Path $dist 'Windows'
 $version = [regex]::Match((Get-Content -Raw "$repo/live/qt/CMakeLists.txt"), 'project\(three_ds_live_qt VERSION ([\d.]+)').Groups[1].Value
 if (!$version) { throw 'Could not read the 3DS Live version.' }
-$archive = Join-Path $dist "3DS-Live-$version-Windows-x64-New3DS.zip"
+$output = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { $dist }
+[void][IO.Directory]::CreateDirectory($output)
+$archive = Join-Path $output "3DS-Live-$version-Windows-x64-New3DS.zip"
 $files = [ordered]@{
     '使用指南.md' = "$repo/INSTALL.md"
     'LICENSE' = "$repo/LICENSE"

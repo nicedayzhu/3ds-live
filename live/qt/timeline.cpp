@@ -67,12 +67,22 @@ void Timeline::paceSource(Frame &frame, int fps) {
     const qint64 pts = frame.source.pts;
     if (lastRawPts && pts <= *lastRawPts)
         return;
-    if (lastRawPts && pts - *lastRawPts < 150000) {
-        const qint64 expected = rawDisplayPts + 1000000 / fps;
-        // Spread a missing capture interval over the following real images.
-        // Bound the phase change against the unmodified shared audio clock.
-        const qint64 correction = std::clamp<qint64>((expected - pts) * 2 / 3, -12000, 12000);
-        frame.displayPts = std::max(rawDisplayPts + 1, pts + correction);
+    if (lastRawPts && pts - *lastRawPts < frameHistoryUs) {
+        constexpr qint64 normalTrim = 12000;
+        const qint64 period = 1000000 / fps;
+        // Absorb ordinary jitter first. After an extended hold, borrow only
+        // the time needed to reach the next real image: spending the entire
+        // buffer on one gap makes the following gap longer.
+        const qint64 maxLead = std::min({normalTrim + period, qint64(delay) / 2, qint64(45000)});
+        const qint64 previousLead = *lastRawPts - rawDisplayPts;
+        const qint64 trim = std::min(maxLead, std::max(normalTrim, previousLead));
+        const qint64 expected = rawDisplayPts + period;
+        const qint64 correction = std::clamp((expected - pts) * 2 / 3, -trim, normalTrim);
+        // Aim to paint within three source periods of the last deadline.
+        // Leave the GUI time to wake and draw the selected image.
+        constexpr qint64 paintAllowance = 6000;
+        const qint64 holdTarget = rawDisplayPts + 3 * period - paintAllowance;
+        frame.displayPts = std::max({rawDisplayPts + 1, pts - maxLead, std::min(pts + correction, holdTarget)});
     }
     lastRawPts = pts;
     rawDisplayPts = frame.displayPts;
@@ -219,12 +229,17 @@ PresentedFrame Timeline::present(int *nextWakeMs) {
     std::lock_guard lock(mutex);
     const auto wall = clockUs();
     const auto playablePts = wall - offset - delay;
-    auto it = frames.upper_bound(playablePts + 15500);
-    while (it != frames.begin() && std::prev(it)->second.displayPts > playablePts)
+    // The map is ordered by capture time. Independent panel updates can have
+    // different playout deadlines. Inspect the queued future frames (64 max)
+    // to find the newest due image and the earliest pending wake.
+    auto it = frames.end();
+    qint64 remaining = 16000;
+    while (it != frames.begin() && std::prev(it)->second.displayPts > playablePts) {
         --it;
+        remaining = std::min(remaining, it->second.displayPts - playablePts);
+    }
     if (nextWakeMs) {
         if (it != frames.end()) {
-            const qint64 remaining = it->second.displayPts - playablePts;
             *nextWakeMs = int(std::clamp<qint64>((remaining + 999) / 1000, 1, motionEnabled ? 4 : 16));
         } else {
             // A worker wakes us when an image is ready. Keep servicing UI controls while idle.

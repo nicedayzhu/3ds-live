@@ -159,7 +159,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         return 2;
     Timeline timeline(o.delay);
     TraceWriter trace;
-    if (cli.isSet("trace") && !trace.start(cli.value("trace"), timeline.diagnostics))
+    const bool tracePaints = cli.isSet("trace");
+    if (tracePaints && !trace.start(cli.value("trace"), timeline.diagnostics))
         return 2;
     Pipeline pipeline(timeline, o.models, o.scale, o.mode, o.motion, o.rifePrecision);
     Speaker speaker(timeline);
@@ -174,7 +175,12 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     QJsonObject modes;
     for (auto it = labels.begin(); it != labels.end(); ++it)
         modes[it.key()] = it.value();
+    auto waitingNotice = [&] {
+        return (o.ip.isEmpty() ? QString("正在发现同一局域网内的 3DS") : QString("等待掌机 %1").arg(o.ip))
+               + QString(" · UDP %1\n在掌机上按 R + SELECT").arg(o.port);
+    };
     void *view = createView({{"title", "3DS Live"},
+                             {"notice", waitingNotice()},
                              {"ip", o.ip},
                              {"scale", o.scale},
                              {"port", o.port},
@@ -406,7 +412,15 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             lastImage = 0;
         }
         if (!im.isNull() && im.cacheKey() != lastImage) {
-            showFrame(view, im);
+            std::function<void()> onPainted;
+            if (tracePaints) {
+                TraceEvent event{"paint", choice.source, 0, 0, choice.id, im.cacheKey(), choice.quality};
+                event.generatedPanels = choice.generatedPanels;
+                onPainted = [&timeline, event = std::move(event)]() mutable {
+                    timeline.diagnostics.add(std::move(event));
+                };
+            }
+            showFrame(view, im, std::move(onPainted));
             lastImage = im.cacheKey();
             ++painted;
             if (lastPaint)
@@ -536,8 +550,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                          .arg(report["socket_error"].toString());
             status = "端口不可用";
         } else if (!hasFrame) {
-            notice = (o.ip.isEmpty() ? QString("正在发现同一局域网内的 3DS") : QString("等待掌机 %1").arg(o.ip))
-                     + QString(" · UDP %1\n在掌机上按 R + SELECT").arg(o.port);
+            notice = waitingNotice();
             status = "等待连接";
         } else if (frozen) {
             notice = "视频已中断 · 保留最后一帧\n收到新上屏后自动恢复";

@@ -1,11 +1,12 @@
 #include "viewer_native.h"
 #include <QtTest>
 #include <QtWidgets>
+#include <algorithm>
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     void *view = live::createView({{"title", "QA"}, {"width", 400}, {"height", 480},
-                                   {"controls", true}, {"record", true}});
+                                   {"controls", true}, {"record", true}, {"notice", "正在发现掌机"}});
     auto update = [&](const char *json) {
         live::updateView(view, QJsonDocument::fromJson(json).object());
     };
@@ -20,12 +21,22 @@ int main(int argc, char **argv) {
             root = widget;
     if (!root)
         return 1;
+    auto *initialCanvas = root->findChild<QWidget *>("canvas");
+    if (!initialCanvas) return 82;
+    const auto startupLabels = initialCanvas->findChildren<QLabel *>();
+    if (std::none_of(startupLabels.cbegin(), startupLabels.cend(), [](const QLabel *label) {
+            return label->isVisible() && label->text() == QStringLiteral("正在发现掌机");
+        })) return 83;
+    update(R"({"notice":""})");
     if (!root->findChild<QComboBox *>("rifePrecision"))
         return 31;
     update(R"({"fpsOptions":[24,30],"rateOptions":[800000],"fps":30,"rate":800000})");
     QImage frame(400, 480, QImage::Format_RGB888);
+    QVector<int> painted;
+    frame.fill(Qt::white);
+    live::showFrame(view, frame, [&] { painted.append(1); });
     frame.fill(QColor(222, 0, 0));
-    live::showFrame(view, frame);
+    live::showFrame(view, frame, [&] { painted.append(2); });
     frame.fill(Qt::black);
     QTest::qWait(50);
     auto *canvas = root->findChild<QWidget *>("canvas");
@@ -40,6 +51,8 @@ int main(int argc, char **argv) {
     menu->close();
     if (canvas->grab().toImage().pixelColor(50, 50) != QColor(222, 0, 0))
         return 3;
+    if (painted != QVector<int>{2})
+        return 81;
     QTest::mouseClick(button, Qt::LeftButton);
     QApplication::processEvents();
     auto *file = root->findChild<QFileDialog *>();
@@ -60,12 +73,16 @@ int main(int argc, char **argv) {
     auto *name = file->findChild<QLineEdit *>("fileNameEdit");
     if (!name)
         return 13;
-    name->setText("sample.mp4");
+    const QString filename = QStringLiteral("游戏画面.mp4");
+    name->selectAll();
+    QInputMethodEvent composition;
+    composition.setCommitString(filename);
+    QApplication::sendEvent(name, &composition);
     QTest::qWait(40);
     QMetaObject::invokeMethod(file, "accept");
     const auto saved = actions();
     if (saved.size() != 1 || saved.first().toObject()["type"] != "record" ||
-        QFileInfo(saved.first().toObject()["path"].toString()).fileName() != "sample.mp4")
+        QFileInfo(saved.first().toObject()["path"].toString()).fileName() != filename)
         return 7;
     update(R"({"recording":"recording","path":"sample.mp4","debug":{"pairs":51}})");
     auto dot = button->grab().toImage();
