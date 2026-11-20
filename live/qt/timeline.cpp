@@ -392,6 +392,33 @@ QByteArray Timeline::pcm(qint64 wall, int samples) const {
         auto hi = std::min<qint64>(it->first + it->second.size() / 4, start + samples);
         if (hi > lo)
             memcpy(out.data() + (lo - start) * 4, it->second.constData() + (lo - it->first) * 4, (hi - lo) * 4);
+
+        const auto next = std::next(it);
+        if (next == audio.end()) continue;
+        const qint64 gapStart = it->first + it->second.size() / 4;
+        const qint64 gapEnd = next->first;
+        const qint64 end = std::min(gapEnd, start + samples);
+        if (gapStart >= end || gapEnd <= start) continue;
+        // A missing DSP block otherwise cuts straight from a nonzero sample to silence.
+        // Reflect and fade at most one real block from each edge. Keep the source samples
+        // and the length of the gap intact, including the silence in a longer interruption.
+        const int edge = int(std::min<qint64>(gapEnd - gapStart, std::min(it->second.size(), next->second.size()) / 4));
+        for (qint64 at = std::max(start, gapStart); at < end; ++at) {
+            const qint64 left = at - gapStart, right = gapEnd - at - 1;
+            if (left >= edge && right >= edge) continue;
+            for (int channel = 0; channel < 2; ++channel) {
+                int mixed = 0;
+                if (left < edge) {
+                    auto *p = it->second.constData() + it->second.size() - 4 * (left + 1) + channel * 2;
+                    mixed += qFromLittleEndian<qint16>(p) * (edge - int(left));
+                }
+                if (right < edge) {
+                    auto *p = next->second.constData() + 4 * right + channel * 2;
+                    mixed += qFromLittleEndian<qint16>(p) * (edge - int(right));
+                }
+                qToLittleEndian<qint16>(qint16(mixed / (edge + 1)), out.data() + 4 * (at - start) + channel * 2);
+            }
+        }
     }
     return out;
 }

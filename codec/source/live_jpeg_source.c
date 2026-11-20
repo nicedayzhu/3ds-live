@@ -163,7 +163,9 @@ int live_jpeg_source_update(LiveJpegSource *s,const void *pixels,size_t bytes,un
     fmt&=7u;
     if(!s||!pixels||fmt>FB_RGBA4)return -1;
     unsigned bpp=fmt==FB_RGBA8?4:fmt==FB_BGR8?3:2,cbpp=bpp;
-    if(stride<240*bpp||stride>1920||bytes<(size_t)(s->width-1)*stride+240*bpp||
+    /* A wide top LCD uses every second physical column, including its padding. */
+    const unsigned maxStride = s->width == 400 ? 2u * 1920u : 1920u;
+    if(stride<240*bpp||stride>maxStride||bytes<(size_t)(s->width-1)*stride+240*bpp||
        s->revision==UINT64_MAX)return -1;
     const uint8_t *src=pixels;
     int reuse=s->valid&&s->format==fmt;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(three_ds_live_qt VERSION 1.2.2 LANGUAGES C CXX)
+project(three_ds_live_qt VERSION 1.2.3 LANGUAGES C CXX)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
 add_library(live_view STATIC viewer.cpp debug_window.cpp)
 target_link_libraries(live_view PUBLIC Qt6::Widgets)

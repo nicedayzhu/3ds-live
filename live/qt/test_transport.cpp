@@ -49,6 +49,41 @@ static void lowRateRecovery() {
         require(!sample(24, 24, 500000, 1350000), "Recovery ignored actual elapsed time");
     }
 }
+static void senderLimitedRecovery() {
+    RecoveryCadence recovery;
+    // Real device at 30 FPS / 600 kB/s. Its encoder produced 642 pairs, the sender
+    // transmitted 585 in these 21 reporting intervals, and the receiver recovered all 585.
+    const int transmitted[] = {30,29,27,26,30,29,27,28,30,29,30,29,29,29,24,22,25,27,27,28,30};
+    const int durations[] = {1000,1010,1010,1010,1020,1040,1010,1030,1050,1010,1020,1030,1000,1020,1020,1020,
+                             1020,1030,1020,1030,1010};
+    RecoveryCadence::Delivery status{UINT32_MAX-1500, UINT32_MAX-50, 0, 1000};
+    int fps = 30, rate = 600000;
+    qint64 wall = 1000000;
+    recovery.confirm(fps, rate, wall, status);
+    auto report = [&](int sent, int received, int ms=1000) {
+        status.elapsedMs += ms;
+        status.sentPairs += sent;
+        status.receivedPairs += received;
+        wall += ms*1000;
+        recovery.confirm(fps, rate, wall, status);
+        return recovery.delivered(fps, rate, wall);
+    };
+    for (unsigned i=0; i<std::size(transmitted); ++i)
+        require(report(transmitted[i],transmitted[i],durations[i]) == (i>=2),
+                "Fully delivered sender-limited stream could not probe a higher rate");
+    require(!recovery.delivered(30, 650000, wall), "Unconfirmed rate inherited delivery reports");
+    require(!recovery.delivered(fps, rate, wall+3000000), "Expired sent counts allowed recovery");
+    require(!report(29, 25), "Network loss was mistaken for a slow sender");
+    for (int i=0; i<3; ++i) report(10,10);
+    require(!recovery.delivered(fps, rate, wall), "A stalled sender counted as recovered");
+    for (int i=0; i<3; ++i) report(27,27);
+    ++status.sendFailures;
+    require(!report(27,27), "Sender timeout counted as healthy delivery");
+    rate=650000;
+    require(!report(27,27), "New sender setting reused older delivery history");
+    recovery.confirm(fps, rate, wall+1000);
+    require(!recovery.delivered(fps, rate, wall+1000), "Absent paired-stream evidence retained delivery history");
+}
 static void delayedFragments(const QByteArray &source) {
     Assembler assembler;
     auto send = [&](quint32 seq, int index, qint64 now) {
@@ -186,5 +221,6 @@ int main() {
     independentPanels();
     recoveredUpper();
     lowRateRecovery();
+    senderLimitedRecovery();
     return 0;
 }

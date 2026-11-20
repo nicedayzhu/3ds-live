@@ -17,14 +17,33 @@ static bool newer(quint32 a, quint32 b) {
     return qint32(a - b) > 0;
 }
 static constexpr qint64 statusTimeoutUs = 2500000;
-void RecoveryCadence::confirm(int fps, int rate, qint64 now) {
+void RecoveryCadence::confirm(int fps, int rate, qint64 now, std::optional<Delivery> delivery) {
     if (fps != confirmedFps || rate != confirmedRate || now - lastStatus > statusTimeoutUs) {
         samples.clear();
+        reports.clear();
         since = now;
+    }
+    if (!delivery) reports.clear();
+    else {
+        if (!reports.empty() && !newer(delivery->elapsedMs, reports.back().elapsedMs)) return;
+        reports.push_back(*delivery);
+        if (reports.size() > 4) reports.pop_front();
     }
     confirmedFps = fps;
     confirmedRate = rate;
     lastStatus = now;
+}
+bool RecoveryCadence::delivered(int fps, int rate, qint64 now) const {
+    if (reports.size() < 4 || fps <= 0 || fps != confirmedFps || rate != confirmedRate ||
+        now - lastStatus > statusTimeoutUs) return false;
+    const auto &first = reports.front(), &last = reports.back();
+    const quint32 elapsed = last.elapsedMs - first.elapsedMs, sent = last.sentPairs - first.sentPairs;
+    const qint64 received = last.receivedPairs - first.receivedPairs;
+    // R10 status is emitted between pairs. Its datagram can cross one pair boundary in flight.
+    // A fading link or stalled sender must not look healthy just because both counters are small.
+    return elapsed >= 2000 && elapsed <= 6000 && first.sendFailures == last.sendFailures &&
+           sent * 100000LL >= elapsed * qint64(fps) * 75 && sent <= elapsed * qint64(fps) / 1000 + 2 &&
+           received >= qint64(sent) - 1 && received <= qint64(sent) + 1;
 }
 bool RecoveryCadence::healthy(int fps, int rate, qint64 begin, qint64 end, int complete) {
     if (begin != lastSampleEnd) samples.clear();

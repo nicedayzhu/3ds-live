@@ -21,16 +21,24 @@ struct Counts {
 quint32 word(QByteArrayView bytes, int index);
 QByteArray message(QByteArray magic, std::initializer_list<quint32> words);
 
-// Three receiver ticks at one confirmed sender setting. This window is used
-// only for upward probing; loss and congestion decisions use the latest tick.
+// Upward probes use receiver cadence and paired delivery between successive sender
+// status reports. Loss and congestion decisions still use the latest receiver tick.
 class RecoveryCadence {
+  public:
+    struct Delivery {
+        quint32 elapsedMs, sentPairs, sendFailures;
+        qint64 receivedPairs;
+    };
+  private:
     int confirmedFps = 0, confirmedRate = 0;
     qint64 since = 0, lastStatus = 0;
     qint64 lastSampleEnd = 0;
     std::deque<std::pair<int, qint64>> samples;
+    std::deque<Delivery> reports;
   public:
-    void confirm(int fps, int rate, qint64 now);
+    void confirm(int fps, int rate, qint64 now, std::optional<Delivery> delivery = {});
     bool healthy(int fps, int rate, qint64 begin, qint64 end, int complete);
+    bool delivered(int fps, int rate, qint64 now) const;
 };
 
 class Assembler {

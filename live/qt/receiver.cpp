@@ -357,8 +357,13 @@ void Receiver::run() {
                 remote = senderPort;
                 hz = int(word(b, 4));
                 cap = int(word(b, 2));
-                recovery.confirm(hz, cap, now);
                 const auto sent = word(b, 7), elapsed = word(b, 1);
+                std::optional<RecoveryCadence::Delivery> delivery;
+                // Only combined, equal-screen streams have one sent pair for every full pair.
+                if (assembler.combined && !splitActive && sent == word(b, 8))
+                    delivery = RecoveryCadence::Delivery{elapsed, sent, word(b, 9) + word(b, 10),
+                                                         assembler.counts.fullPairs};
+                recovery.confirm(hz, cap, now, delivery);
                 if (!latestStatusMs || qint32(elapsed - *latestStatusMs) > 0)
                     latestStatusMs = elapsed;
                 if (!lastSent || quint32(elapsed - lastProgressMs) >= 900) {
@@ -453,8 +458,9 @@ void Receiver::run() {
         const double receivedFps = complete * 1000000. / (now - tick);
         const bool healthyCadence = freq > 0 && receivedFps >= freq * .94 && lagMs < 120;
         const bool lowStep = effective < target && effective < 600000;
-        const bool healthyRecovery = lowStep ? recovery.healthy(freq, effective, tick, now, complete) && lagMs < 120
-                                             : healthyCadence;
+        const bool cadenceRecovery = lowStep ? recovery.healthy(freq, effective, tick, now, complete) : healthyCadence;
+        const bool matchingDelivery = recovery.delivered(freq, effective, now);
+        const bool healthyRecovery = lagMs < 120 && (cadenceRecovery || (complete > 0 && matchingDelivery));
         bool severe = lost >= 5 || (lost && lost * 100 >= 12 * (complete + lost)) || missing >= 32 ||
                       late >= 24 || (complete && lagMs >= 250);
         const bool pressure = severe || (complete && lagMs >= 180) || lost >= 2 || missing >= 8 || late >= 8 ||
@@ -550,6 +556,7 @@ void Receiver::run() {
         report["effective_rate"] = effective;
         report["effective_fps"] = freq;
         report["recovery_stable_seconds"] = stable;
+        report["recovery_matches_sender"] = matchingDelivery;
         report["config_confirmed"] = cap == effective && hz == freq;
         report["max_rate"] = deviceMax;
         report["fps_mask"] = mask;

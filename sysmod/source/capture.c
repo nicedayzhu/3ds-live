@@ -12,6 +12,7 @@
 #define MAX_STRIDE (240u * 4u * 2u)
 #define MIX_WORDS 160u
 
+typedef enum { BUFFER_FREE, CONVERT_PENDING, CONVERTED, CONVERT_FAILED } ConvertState;
 typedef struct {
     u8 *pixels;
     Handle dma;
@@ -19,6 +20,9 @@ typedef struct {
     u64 captured, modeChanged, retryAfter, lastPoll;
     u32 lastSwapUs;
     bool valid, wide, pendingChange, preciseSwap;
+    u32 dmaMode, dmaStride;
+    u64 dmaTick;
+    ConvertState conversion;
 } Screen;
 
 static Screen screens[2];
@@ -26,6 +30,8 @@ static u64 epoch;
 static u32 appPid, appBase;
 static u64 nextAppLookup;
 static Thread audioThread;
+static Thread converter;
+static LightEvent frameReady;
 static bool stopping;
 static bool audioReset;
 
@@ -131,33 +137,30 @@ static Handle copy_display(const Screen *screen)
     return dma;
 }
 
+// A screen's one DMA buffer stays owned by the converter until it publishes the result.
+// The display poller can still observe swaps on both LCDs while RGB -> YCbCr is running.
+static void convert_main(void *unused)
+{
+    (void)unused;
+    while (!__atomic_load_n(&stopping, __ATOMIC_ACQUIRE)) {
+        LightEvent_Wait(&frameReady);
+        for (unsigned index = 0; index < 2; ++index) {
+            Screen *s = &screens[index];
+            if (__atomic_load_n(&s->conversion, __ATOMIC_ACQUIRE) != CONVERT_PENDING) continue;
+            bool ok = R_SUCCEEDED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s->pixels, s->bytes));
+            if (ok) {
+                // Read the same 400 even columns in 800-wide mode without rewriting the DMA buffer.
+                const u32 stride = s->wide ? 2 * s->dmaStride : s->dmaStride;
+                ok = live_submit(index, s->pixels, s->dmaMode, stride, timestamp(s->dmaTick), false);
+            }
+            __atomic_store_n(&s->conversion, ok ? CONVERTED : CONVERT_FAILED, __ATOMIC_RELEASE);
+        }
+    }
+}
+
 static void poll_screen(unsigned index, u64 now)
 {
     Screen *s = &screens[index];
-    if (s->dma) {
-        DmaState state;
-        Result rc = svcGetDmaState(&state, s->dma);
-        if (R_SUCCEEDED(rc) && state == DMASTATE_DONE) {
-            svcCloseHandle(s->dma);
-            s->dma = 0;
-            if (R_SUCCEEDED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s->pixels, s->bytes))) {
-                if (s->wide) {
-                    // The LCD contains 800 native columns. Keep every other column for the 400-wide stream.
-                    for (unsigned x = 1; x < 400; ++x)
-                        memcpy(s->pixels + x*s->stride, s->pixels + 2*x*s->stride, s->stride);
-                }
-                const u32 pts = timestamp(s->captured);
-                if (live_submit(index, s->pixels, s->mode, s->stride, pts, false)) {
-                    s->submittedPts = pts;
-                    s->valid = true;
-                }
-            }
-        } else if (R_FAILED(rc) || now - s->captured > SYSCLOCK_ARM11 / 10) {
-            svcStopDma(s->dma);
-            svcCloseHandle(s->dma);
-            s->dma = 0;
-        } else return;
-    }
     const volatile u32 *lcd = (const volatile u32 *)(0x1EF00400u + index*0x100u);
     const u32 selection = lcd[0x78/4] & 1;
     const u32 addr = lcd[selection ? 0x6C/4 : 0x68/4];
@@ -181,6 +184,29 @@ static void poll_screen(unsigned index, u64 now)
     s->lastPoll = now;
     s->observedAddr = addr;
     s->selection = selection;
+    if (s->dma) {
+        DmaState state;
+        Result rc = svcGetDmaState(&state, s->dma);
+        if (R_SUCCEEDED(rc) && state == DMASTATE_DONE) {
+            svcCloseHandle(s->dma);
+            s->dma = 0;
+            if (s->captured == s->dmaTick) {
+                __atomic_store_n(&s->conversion, CONVERT_PENDING, __ATOMIC_RELEASE);
+                LightEvent_Signal(&frameReady);
+            }
+        } else if (R_FAILED(rc) || now - s->dmaTick > SYSCLOCK_ARM11 / 10) {
+            svcStopDma(s->dma);
+            svcCloseHandle(s->dma);
+            s->dma = 0;
+        } else return;
+    }
+    const ConvertState conversion = __atomic_load_n(&s->conversion, __ATOMIC_ACQUIRE);
+    if (conversion == CONVERT_PENDING) return;
+    if (conversion == CONVERTED && s->captured == s->dmaTick) {
+        s->submittedPts = timestamp(s->dmaTick);
+        s->valid = true;
+    }
+    if (conversion != BUFFER_FREE) __atomic_store_n(&s->conversion, BUFFER_FREE, __ATOMIC_RELEASE);
     if (now - s->modeChanged < SYSCLOCK_ARM11 / 5) return;
     const unsigned format = mode & 7;
     const u32 pixelBytes = format == 0 ? 4 : format == 1 ? 3 : 2;
@@ -202,11 +228,13 @@ static void poll_screen(unsigned index, u64 now)
         }
         s->capacity = size;
     }
-    // A wide frame was downsampled in place after the last DMA. Discard those dirty cache lines first.
+    // Hand the buffer to DMA only after the previous reader has released it.
     if (R_FAILED(svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s->pixels, s->bytes))) return;
     s->dma = copy_display(s);
     if (s->dma) {
-        s->captured = now;
+        s->dmaTick = s->captured = now;
+        s->dmaMode = mode;
+        s->dmaStride = stride;
         s->pendingChange = false;
     }
 }
@@ -269,7 +297,13 @@ bool capture_start(void)
     nextAppLookup = 0;
     epoch = svcGetSystemTick();
     __atomic_store_n(&stopping, false, __ATOMIC_RELEASE);
-    audioThread = threadCreate(audio_main, NULL, 8192, 0x30, 1, false);
+    LightEvent_Init(&frameReady, RESET_ONESHOT);
+    converter = threadCreate(convert_main, NULL, 8192, 0x30, 2, false);
+    if (!converter) converter = threadCreate(convert_main, NULL, 8192, 0x3f, 1, false);
+    if (!converter) return false;
+    // A DSP mix block lasts 4.89 ms. Poll above the display/DMA thread (0x28)
+    // so video work cannot postpone both reads past the buffer's next overwrite.
+    audioThread = threadCreate(audio_main, NULL, 8192, 0x18, 1, false);
     return audioThread != NULL;
 }
 
@@ -284,6 +318,9 @@ void capture_reset(void)
             svcCloseHandle(s->dma);
             s->dma = 0;
         }
+        while (__atomic_load_n(&s->conversion, __ATOMIC_ACQUIRE) == CONVERT_PENDING)
+            svcSleepThread(1000000);
+        __atomic_store_n(&s->conversion, BUFFER_FREE, __ATOMIC_RELEASE);
         s->valid = false;
         s->captured = 0;
         s->retryAfter = 0;
@@ -307,6 +344,12 @@ void capture_poll(void)
 void capture_stop(void)
 {
     __atomic_store_n(&stopping, true, __ATOMIC_RELEASE);
+    if (converter) {
+        LightEvent_Signal(&frameReady);
+        threadJoin(converter, U64_MAX);
+        threadFree(converter);
+        converter = NULL;
+    }
     if (audioThread) {
         threadJoin(audioThread, U64_MAX);
         threadFree(audioThread);

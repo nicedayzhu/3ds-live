@@ -1,5 +1,6 @@
 #include "recording.h"
 #include <QtTest>
+#include <QtEndian>
 #include <windows.h>
 extern "C" {
 #include <libavformat/avformat.h>
@@ -51,6 +52,43 @@ static void verifyOutput(const QString &path, bool expectSuccess) {
 class MediaTests : public QObject {
     Q_OBJECT
   private slots:
+    void missingAudioFadesOnlyInsideTheGap() {
+        Timeline timeline(0);
+        timeline.reset(1);
+        constexpr qint64 origin = 1000000;
+        auto block = [&](quint32 seq, quint32 pts, qint16 value) {
+            QByteArray b(24 + 175, 0);
+            memcpy(b.data(), "R9A1", 4);
+            qToLittleEndian<quint16>(1, b.data() + 12);
+            qToLittleEndian<quint32>(32728498, b.data() + 16);
+            qToLittleEndian<quint16>(160, b.data() + 20);
+            qToLittleEndian<quint16>(2, b.data() + 22);
+            qToLittleEndian(seq, b.data() + 24);
+            qToLittleEndian(pts, b.data() + 28);
+            // Zero IMA codes at index zero preserve the initial sample on each channel.
+            qToLittleEndian(value, b.data() + 32);
+            qToLittleEndian<qint16>(-value, b.data() + 36);
+            timeline.addAudio(b, origin + pts);
+        };
+        block(1, 0, 12000);
+        block(2, 4889, 12000);
+        block(3, 30000, -9000);
+        const auto pcm = timeline.pcm(origin, 1600);
+        auto sample = [&](int frame, int channel) {
+            return qFromLittleEndian<qint16>(pcm.constData() + 4 * frame + 2 * channel);
+        };
+        QCOMPARE(sample(234, 0), 12000);
+        QCOMPARE(sample(235, 0), 12000);
+        QCOMPARE(sample(468, 0), 12000);
+        QVERIFY(sample(469, 0) > 11900 && sample(469, 0) < 12000);
+        QCOMPARE(sample(469, 1), -sample(469, 0));
+        QCOMPARE(sample(900, 0), 0);
+        QVERIFY(sample(1439, 0) < -8900 && sample(1439, 0) > -9000);
+        QCOMPARE(sample(1440, 0), -9000);
+        QCOMPARE(sample(1440, 1), 9000);
+        // The speaker and recorder ask for differently sized windows; the fill is sample-aligned.
+        QCOMPARE(timeline.pcm(origin + 10000, 960), pcm.mid(480 * 4, 960 * 4));
+    }
     void restoredUpperWakesIdlePresentation() {
         Timeline t(160);
         t.setPictureMode("fbcnn");
