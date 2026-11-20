@@ -15,7 +15,8 @@ app = Path(__file__).resolve().parent
 font_path = Path(sys.argv[1])
 if hashlib.sha256(font_path.read_bytes()).hexdigest() != "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da":
     raise SystemExit("Use the pinned Noto Sans SC variable font listed above.")
-source = (app / "source/launcher_ui.c").read_text(encoding="utf-8")
+source = "\n".join((app / "source" / name).read_text(encoding="utf-8")
+                   for name in ("launcher_text.c", "launcher_ui.c"))
 strings = re.findall(r'"([^"\n]*)"', source)
 characters = sorted(set("".join(strings)) | {chr(n) for n in range(32, 127)})
 # Offsets in the blob are little-endian, relative to the start of launcher_font.

@@ -1,4 +1,5 @@
 #include "launcher_ui.h"
+#include "launcher_text.h"
 #include <3ds.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -13,12 +14,16 @@ _Static_assert(sizeof(Glyph) == 12, "Font atlas record layout");
 
 static void rect(Screen s, int x, int y, int w, int h, u32 color)
 {
-    for (int col = x; col < x + w && col < s.width; ++col) {
-        if (col < 0) continue;
-        for (int row = y; row < y + h && row < 240; ++row) {
-            if (row < 0) continue;
-            u8 *p = s.pixels + 3 * (240 * col + 239 - row);
-            p[0] = (u8)color; p[1] = (u8)(color >> 8); p[2] = (u8)(color >> 16);
+    const int right = x + w < s.width ? x + w : s.width;
+    const int bottom = y + h < 240 ? y + h : 240;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (bottom <= y) return;
+    const u8 b = (u8)color, g = (u8)(color >> 8), r = (u8)(color >> 16);
+    for (int col = x; col < right; ++col) {
+        u8 *p = s.pixels + 3 * (240 * col + 240 - bottom);
+        for (int row = y; row < bottom; ++row) {
+            *p++ = b; *p++ = g; *p++ = r;
         }
     }
 }
@@ -96,43 +101,35 @@ static void label(Screen s, int x, int baseline, Face face, u32 color, const cha
     }
 }
 
-typedef struct {
-    const char *title, *description, *action_key, *action;
-    u32 accent;
-} StateCopy;
-
 enum {
     BLUE = 0x86BDFF, GREEN = 0x78DDAD, AMBER = 0xF3C178, RED = 0xFFA996,
     MUTED = 0xA9BFBC, PAPER = 0xEFF3ED, INK = 0x1B3533, SECONDARY = 0x425E59
 };
 
-static const StateCopy live_states[] = {
-    [LAUNCHER_READY] = {"准备就绪", "在同一网络的电脑上打开 3DS Live。", "R + SELECT", "开始推流", BLUE},
-    [LAUNCHER_STOPPED] = {"推流已停止", "可以留在这里，也可以回到游戏。", "R + SELECT", "重新开始推流", MUTED},
-    [LAUNCHER_SEARCHING] = {"正在寻找电脑", "请打开 PC 播放器，并连接同一局域网。", "R + SELECT", "停止推流", AMBER},
-    [LAUNCHER_PAIRED] = {"电脑已连接", "正在等待电脑确认收到完整画面。", "R + SELECT", "停止推流", AMBER},
-    [LAUNCHER_RECEIVING] = {"正在投屏", "电脑已确认收到双屏画面。", "R + SELECT", "停止推流", GREEN},
-    [LAUNCHER_SLEEP] = {"掌机已休眠", "开盖后会重新连接播放器。", "下一步", "开盖唤醒掌机", MUTED},
-    [LAUNCHER_ERROR] = {"推流启动失败", "请检查无线连接，再尝试开启推流。", "R + SELECT", "重试推流", RED}
-};
-
-static const StateCopy startup_states[] = {
-    [UI_STARTING] = {"正在启动", "正在检查 SD 卡和内置直播模块。", NULL, NULL, MUTED},
-    [UI_WAIT_STATUS] = {"等待模块回应", "尚未读到当前直播模块的状态。", "状态文件", "/3ds/3ds-live/status.txt", AMBER},
-    [UI_OLD_MODEL] = {"机型不支持", "当前掌机无法运行直播模块。", "支持机型", "New 3DS 或 New 2DS 系列", RED},
-    [UI_ROMFS] = {"启动器读取失败", "无法打开启动器内的资源。", "下一步", "重新复制 3DSX 或安装 CIA", RED},
-    [UI_BUNDLE] = {"模块文件无效", "启动器内的直播模块不完整。", "下一步", "重新复制 3DSX 或安装 CIA", RED},
-    [UI_CONFLICT] = {"检测到文件冲突", "请核对 /luma/sysmodules/ 中的文件和备份。", "模块文件", "0004013000F1D402.cxi", AMBER},
-    [UI_INSTALL] = {"模块写入失败", "无法将直播模块安装到 SD 卡。", "下一步", "检查 SD 卡空间和写入状态", RED},
-    [UI_OLD_BUSY] = {"等待旧版停流", "新版模块已安装，旧版仍在使用中。", "下一步", "停流后重新打开启动器", AMBER},
-    [UI_REBOOT] = {"需要重启掌机", "新版模块已安装，旧版尚未退出。", "下一步", "保存游戏进度后重启掌机", AMBER},
-    [UI_LAUNCH] = {"模块未能启动", "请确认 Luma 已开启外部模块加载。", "下一步", "保存进度，检查设置后重启", RED},
-    [UI_MODEL_QUERY] = {"无法识别机型", "系统未能返回掌机型号。", "下一步", "退出后重新打开启动器", RED}
-};
-
-static void battery(Screen s, const LauncherDevice *d)
+static u32 state_accent(const LauncherView *v)
 {
-    const char *caption = d->charging == 1 ? "充电中" : d->battery < 0 ? "电量未知" : "电量";
+    switch (v->page) {
+        case UI_LIVE:
+            switch (v->module.state) {
+                case LAUNCHER_READY: return BLUE;
+                case LAUNCHER_SEARCHING:
+                case LAUNCHER_PAIRED: return AMBER;
+                case LAUNCHER_RECEIVING: return GREEN;
+                case LAUNCHER_ERROR: return RED;
+                default: return MUTED;
+            }
+        case UI_STARTING: return MUTED;
+        case UI_WAIT_STATUS:
+        case UI_CONFLICT:
+        case UI_OLD_BUSY:
+        case UI_REBOOT: return AMBER;
+        default: return RED;
+    }
+}
+
+static void battery(Screen s, const LauncherDevice *d, const LauncherText *text)
+{
+    const char *caption = d->charging == 1 ? text->charging : d->battery < 0 ? text->battery_unknown : text->battery;
     label(s, 339 - text_width(SMALL, caption), 32, SMALL, MUTED, caption);
     outline(s, 347, 20, 28, 13, MUTED);
     rect(s, 375, 24, 2, 5, MUTED);
@@ -144,51 +141,56 @@ static void battery(Screen s, const LauncherDevice *d)
         rect(s, 350 + 5*i, 23, 3, 7, d->battery <= 1 && d->charging != 1 ? AMBER : GREEN);
 }
 
-static void top_screen(Screen s, const LauncherView *v)
+static void top_screen(Screen s, const LauncherView *v, const LauncherText *text)
 {
-    const StateCopy *state = v->page == UI_LIVE ? &live_states[v->module.state] : &startup_states[v->page];
+    const LauncherStateText *state = v->page == UI_LIVE ? &text->live[v->module.state] : &text->startup[v->page];
+    const u32 accent = state_accent(v);
     rect(s, 0, 0, s.width, 240, 0x14282A);
     // Two LCDs form the small product mark.
     outline(s, 22, 17, 21, 12, GREEN);
     outline(s, 24, 31, 17, 9, GREEN);
     label(s, 53, 35, HEADING, 0xF2F6EF, "3DS Live");
-    battery(s, &v->device);
+    battery(s, &v->device, text);
     rect(s, 22, 52, 356, 1, 0x38504F);
-    dot(s, 26, 75, 4, state->accent);
-    label(s, 39, 80, SMALL, state->accent, "直播状态");
+    dot(s, 26, 75, 4, accent);
+    label(s, 39, 80, SMALL, accent, text->status);
     label(s, 21, 127, TITLE, 0xF6F7EF, state->title);
     label(s, 23, 157, BODY, 0xC9D9D4, state->description);
 
-    if (!state->action_key) return;
+    if (!state->key) return;
     rect(s, 0, 183, s.width, 57, 0x203A3B);
-    const int key_width = 18 + text_width(SMALL, state->action_key);
+    const int key_width = 18 + text_width(SMALL, state->key);
     rect(s, 22, 197, key_width, 27, 0x314D4D);
-    label(s, 31, 216, SMALL, 0xE0EBE4, state->action_key);
+    label(s, 31, 216, SMALL, 0xE0EBE4, state->key);
     label(s, 34 + key_width, 217, BODY, 0xEFF5ED, state->action);
 }
 
-static const char *led_reading(const LauncherView *v, u32 *color)
+static const char *led_reading(const LauncherView *v, const LauncherText *text, u32 *color)
 {
     *color = 0x526A68;
-    if (v->page != UI_LIVE) return "未知";
-    if (v->module.led_result >> 31) return "设置失败";
+    if (v->page != UI_LIVE) return text->unknown;
+    if (v->module.led_result >> 31) return text->led_failed;
     switch (v->module.state) {
-        case LAUNCHER_READY: *color = 0x2869AD; return "蓝灯常亮";
+        case LAUNCHER_READY: *color = 0x2869AD; return text->led_blue;
         case LAUNCHER_PAIRED:
-        case LAUNCHER_SEARCHING: *color = 0x9B641C; return "琥珀色呼吸";
-        case LAUNCHER_RECEIVING: *color = 0x18764C; return "绿灯常亮";
-        case LAUNCHER_ERROR: *color = 0xA54735; return "红灯短闪";
-        default: return "熄灭";
+        case LAUNCHER_SEARCHING: *color = 0x9B641C; return text->led_amber;
+        case LAUNCHER_RECEIVING: *color = 0x18764C; return text->led_green;
+        case LAUNCHER_ERROR: *color = 0xA54735; return text->led_red;
+        default: return text->led_off;
     }
 }
 
-static void bottom_screen(Screen s, const LauncherView *v)
+static void bottom_screen(Screen s, const LauncherView *v, const LauncherText *text)
 {
     rect(s, 0, 0, s.width, 240, PAPER);
-    label(s, 20, 36, HEADING, INK, "设备信息");
+    label(s, 20, 36, HEADING, INK, text->device);
+    const int language_x = 300 - text_width(SMALL, text->switch_to);
+    outline(s, language_x - 25, 20, 18, 18, 0x8BA496);
+    label(s, language_x - 20, 34, SMALL, INK, "X");
+    label(s, language_x, 34, SMALL, SECONDARY, text->switch_to);
     rect(s, 20, 50, 280, 1, 0xBBCBC2);
-    label(s, 20, 84, BODY, SECONDARY, "无线网络");
-    const char *wifi = v->device.wifi < 0 ? "未知" : v->device.wifi ? "已连接" : "未连接";
+    label(s, 20, 84, BODY, SECONDARY, text->wifi);
+    const char *wifi = v->device.wifi < 0 ? text->unknown : v->device.wifi ? text->connected : text->disconnected;
     int wifi_x = 300 - text_width(BODY, wifi);
     label(s, wifi_x, 84, BODY, INK, wifi);
     if (v->device.wifi == 1 && v->device.strength >= 0) {
@@ -205,12 +207,12 @@ static void bottom_screen(Screen s, const LauncherView *v)
         char code[20];
         if (v->page == UI_INSTALL) snprintf(code, sizeof code, "%" PRIu32, v->detail);
         else snprintf(code, sizeof code, "0x%08" PRIX32, v->page == UI_LIVE ? v->module.result : v->detail);
-        label(s, 20, 132, BODY, SECONDARY, "错误代码");
+        label(s, 20, 132, BODY, SECONDARY, text->error_code);
         label(s, 300-text_width(BODY, code), 132, BODY, 0x99432F, code);
     } else {
         u32 color;
-        const char *reading = led_reading(v, &color);
-        label(s, 20, 132, BODY, SECONDARY, "通知灯");
+        const char *reading = led_reading(v, text, &color);
+        label(s, 20, 132, BODY, SECONDARY, text->led);
         const int x = 300-text_width(BODY, reading);
         if (v->page == UI_LIVE) dot(s, x-12, 125, 4, color);
         label(s, x, 132, BODY, INK, reading);
@@ -220,15 +222,31 @@ static void bottom_screen(Screen s, const LauncherView *v)
     const int inset = v->page == UI_LIVE ? 0 : 12;
     outline(s, 20, 174 + inset, 58, 25, 0x8BA496);
     label(s, 29, 192 + inset, SMALL, INK, "START");
-    label(s, 89, 193 + inset, BODY, INK, "退出启动器");
+    label(s, 89, 193 + inset, BODY, INK, text->close);
     if (v->page == UI_LIVE)
-        label(s, 20, 220, SMALL, SECONDARY, "退出后仍可在游戏里开始或停止推流。");
+        label(s, 20, 220, SMALL, SECONDARY, text->in_game);
 }
 
-void launcher_ui_draw(const LauncherView *view)
+void launcher_ui_draw(const LauncherView *v, const LauncherView *previous)
 {
-    top_screen((Screen){gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL), 400}, view);
-    bottom_screen((Screen){gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL), 320}, view);
-    gfxFlushBuffers();
-    gfxSwapBuffers();
+    const bool both = !previous || v->language != previous->language || v->page != previous->page ||
+        (v->page == UI_LIVE && v->module.state != previous->module.state);
+    const bool top = both || v->device.battery != previous->device.battery ||
+        v->device.charging != previous->device.charging;
+    const bool bottom = both || v->device.wifi != previous->device.wifi ||
+        v->device.strength != previous->device.strength || v->detail != previous->detail ||
+        v->module.led_result != previous->module.led_result || v->module.result != previous->module.result;
+    const LauncherText *text = &launcher_text[v->language];
+    if (top) {
+        Screen s = {gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL), 400};
+        top_screen(s, v, text);
+        GSPGPU_FlushDataCache(s.pixels, s.width * 240 * 3);
+    }
+    if (bottom) {
+        Screen s = {gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL), 320};
+        bottom_screen(s, v, text);
+        GSPGPU_FlushDataCache(s.pixels, s.width * 240 * 3);
+    }
+    if (top) gfxScreenSwapBuffers(GFX_TOP, false);
+    if (bottom) gfxScreenSwapBuffers(GFX_BOTTOM, false);
 }

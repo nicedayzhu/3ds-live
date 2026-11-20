@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "launcher_ui.h"
 #include "live_launcher.h"
@@ -163,20 +164,25 @@ static void on_applet_event(APT_HookType event, void *unused)
         __atomic_store_n(&resumed, true, __ATOMIC_RELEASE);
 }
 
-static bool same_view(const LauncherView *a, const LauncherView *b)
+static LauncherLanguage system_language(void)
 {
-    return a->page == b->page && a->detail == b->detail &&
-           a->module.state == b->module.state && a->module.result == b->module.result &&
-           a->module.led_result == b->module.led_result && a->device.wifi == b->device.wifi &&
-           a->device.strength == b->device.strength && a->device.battery == b->device.battery &&
-           a->device.charging == b->device.charging;
+    if (R_FAILED(cfguInit())) return LAUNCHER_LANG_EN;
+    u8 language = CFG_LANGUAGE_EN;
+    Result rc = CFGU_GetSystemLanguage(&language);
+    cfguExit();
+    return R_SUCCEEDED(rc) && (language == CFG_LANGUAGE_ZH || language == CFG_LANGUAGE_TW)
+           ? LAUNCHER_LANG_ZH : LAUNCHER_LANG_EN;
 }
+
+static const char language_path[] = "sdmc:/3ds/3ds-live/launcher-language.txt";
 
 int main(void)
 {
     gfxInitDefault();
-    LauncherView view = { .page = UI_STARTING, .device = { -1, -1, -1, -1 } };
-    launcher_ui_draw(&view);
+    const LauncherLanguage system = system_language();
+    LauncherView view = { .page = UI_STARTING, .device = { -1, -1, -1, -1 },
+                          .language = launcher_language_load(language_path, system) };
+    launcher_ui_draw(&view, NULL);
     gspWaitForVBlank();
     aptHookCookie hook;
     aptHook(&hook, on_applet_event, NULL);
@@ -187,20 +193,32 @@ int main(void)
     u64 next_module = 0, next_device = 0;
     while (aptMainLoop()) {
         hidScanInput();
-        if (hidKeysDown() & KEY_START) break;
+        const u32 keys = hidKeysDown();
+        if (keys & KEY_START) break;
+        const bool switch_language = (keys & KEY_X) != 0;
+        if (switch_language)
+            view.language = view.language == LAUNCHER_LANG_ZH ? LAUNCHER_LANG_EN : LAUNCHER_LANG_ZH;
         const u64 now = svcGetSystemTick();
         const bool restore = __atomic_exchange_n(&resumed, false, __ATOMIC_ACQ_REL);
-        if (watch.enabled && (restore || now >= next_module)) {
+        const bool sample_module = watch.enabled && (restore || now >= next_module);
+        const bool sample_device = restore || now >= next_device;
+        if (sample_module) {
             update_module_view(&watch, &view, now);
             next_module = now + SYSCLOCK_ARM11 / 2;
         }
-        if (restore || now >= next_device) {
+        if (sample_device) {
             view.device = launcher_device_read();
             next_device = now + 2ull * SYSCLOCK_ARM11;
         }
-        if (restore || !same_view(&view, &previous)) {
-            launcher_ui_draw(&view);
+        if (switch_language || sample_module || sample_device) {
+            launcher_ui_draw(&view, restore ? NULL : &previous);
             previous = view;
+        }
+        if (switch_language && !launcher_language_save(language_path, view.language, system) && errno == ENOENT) {
+            // A CIA can be started before its SD data directory exists.
+            mkdir("sdmc:/3ds", 0777);
+            mkdir("sdmc:/3ds/3ds-live", 0777);
+            launcher_language_save(language_path, view.language, system);
         }
         gspWaitForVBlank();
     }

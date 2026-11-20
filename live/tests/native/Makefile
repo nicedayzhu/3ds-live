@@ -3,7 +3,7 @@ CC ?= cc
 OUT := ../../build/native-tests
 CPPFLAGS += -I../../../codec/include
 CFLAGS += -O2 -std=c11 -Wall -Wextra -Werror
-TESTS := test_live test_pacing test_rate test_pair test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_module_install test_launcher_status
+TESTS := test_live test_pacing test_rate test_pair test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_module_install test_launcher_status test_launcher_language
 BINS := $(addprefix $(OUT)/,$(TESTS))
 
 .PHONY: check
@@ -23,5 +23,7 @@ $(OUT)/test_module_install: CPPFLAGS += -I../../../app/source
 $(OUT)/test_module_install: ../../../app/source/module_install.c ../../../app/source/module_install.h
 $(OUT)/test_launcher_status: CPPFLAGS += -I../../../app/source
 $(OUT)/test_launcher_status: ../../../app/source/launcher_status.c ../../../app/source/launcher_status.h
+$(OUT)/test_launcher_language: CPPFLAGS += -I../../../app/source
+$(OUT)/test_launcher_language: ../../../app/source/launcher_language.c ../../../app/source/launcher_language.h
 $(OUT)/%: %.c $(wildcard ../../../codec/include/live*.h) | $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(filter %.c,$^) -o $@

@@ -2,6 +2,7 @@
 #define LAUNCHER_UI_H
 
 #include "launcher_device.h"
+#include "launcher_language.h"
 #include "launcher_status.h"
 
 typedef enum {
@@ -14,9 +15,10 @@ typedef struct {
     LauncherStatus module;
     LauncherDevice device;
     uint32_t detail;
+    LauncherLanguage language;
 } LauncherView;
 
-/* Paint both native screens and present them together. Call after gfxInitDefault. */
-void launcher_ui_draw(const LauncherView *view);
+/* A null previous view repaints both screens after start or system restore. */
+void launcher_ui_draw(const LauncherView *view, const LauncherView *previous);
 
 #endif

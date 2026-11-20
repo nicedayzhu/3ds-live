@@ -8,7 +8,11 @@
 
 ## 掌机安装与升级
 
-1.2.11 更新了掌机启动器的双屏界面。上屏显示当前直播状态、下一步操作和电池状态，下屏可查看无线网络、通知灯和退出快捷键。发生启动错误时，下屏会列出可用的错误代码。已使用 1.2.9 Windows 绿色版时，只需替换掌机上的 3DSX 或安装新版 CIA。
+1.2.12 掌机启动器支持简体中文和英文。首次打开时跟随掌机系统语言，简体或繁体中文系统显示简体中文，其他语言显示英文。在启动器按 **X** 可随时切换语言，下次打开时会记住选择。切回系统语言后会恢复跟随系统。
+
+The launcher supports English and Simplified Chinese. Chinese systems default to Simplified Chinese. All other systems default to English. Press **X** to switch languages. Your choice is saved across launches. Switching back to the system language restores automatic selection.
+
+上屏显示当前直播状态、下一步操作和电池状态，下屏可查看无线网络、通知灯和退出快捷键。发生启动错误时，下屏会列出可用的错误代码。已使用 1.2.9 Windows 绿色版时，只需替换掌机上的 3DSX 或安装新版 CIA。
 
 推流时按 **HOME** 切换界面，掌机会暂停采集约 0.75 秒，再自动恢复同一场直播。PC 播放器从 1.2.9 起会在弱网时保持你选择的目标帧率。
 
