@@ -21,6 +21,8 @@
 
 本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。掌机 SD 卡所需文件在 `dist/SD`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。
 
+本机工作副本在 `.git/info/3ds-live-desktop-output` 保留一个空目录，供 PowerShell 在清理 `dist` 后恢复发布目录的 NTFS 完整性标签。新建的 `dist/Windows` 仍从当前父目录继承访问权限。其他工作副本按默认方式创建输出目录。
+
 编译可选的 NVIDIA 后端时，将 `CUDA_PATH` 指向 CUDA SDK，`TensorRT_ROOT` 指向 TensorRT SDK，再向 Qt 构建脚本传 `-TensorRT`。如需一并部署本机配套引擎和运行库，传 `-AccelerationDirectory <加速目录>`。通用 ZIP 携带 DirectML 模型，本机兼容的 TensorRT 文件可放在 `Windows/runtime/acceleration/`。
 
 ## 源码

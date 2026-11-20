@@ -51,6 +51,34 @@ function Install-Dependency($id,$target,$marker,$url,$hash,$filter) {
     }
     Invoke-Checked $seven (@('x','-y',"-o$cache/$target",$archive) + $filter)
 }
+$projectOutput = [IO.Path]::GetFullPath((Join-Path $repo 'dist/Windows'))
+$directoryTemplate = Join-Path $repo '.git/info/3ds-live-desktop-output'
+if ([IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($out)) -eq $projectOutput -and
+    ![IO.Directory]::Exists($out) -and [IO.Directory]::Exists($directoryTemplate)) {
+    # This checkout can retain its local NTFS desktop-release label across clean builds.
+    # Move only a new, empty directory. The executable and DLLs are built into their final location.
+    $parent = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($projectOutput))
+    foreach ($dir in @($parent.FullName, $directoryTemplate, "$repo/.git/info", "$repo/.git")) {
+        if ([IO.File]::GetAttributes($dir).HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            throw "Expected a local release directory: $dir"
+        }
+    }
+    $name = '.new-windows-' + [guid]::NewGuid().ToString('N')
+    $empty = [IO.Directory]::CreateDirectory((Join-Path $directoryTemplate $name))
+    $candidate = Join-Path $parent.FullName $name
+    try {
+        [IO.Directory]::Move($empty.FullName, $candidate)
+        # Inherit today's destination access rules, retaining only the local integrity label.
+        & icacls.exe $candidate /reset /Q | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not inherit release directory access rules.' }
+        try { [IO.Directory]::Move($candidate, $projectOutput) }
+        catch [IO.IOException] { if (![IO.Directory]::Exists($projectOutput)) { throw } }
+    } finally {
+        foreach ($path in @($empty.FullName, $candidate)) {
+            if ([IO.Directory]::Exists($path)) { [IO.Directory]::Delete($path, $false) }
+        }
+    }
+}
 New-Item -ItemType Directory -Force $cache,$runtime | Out-Null
 $payload = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 function Install-RuntimeFile([string]$src, [string]$relative) {
@@ -128,16 +156,20 @@ if ($AccelerationDirectory) {
 }
 # Windows ships a different ONNX Runtime in System32, which precedes PATH during DLL resolution.
 Copy-Item -LiteralPath "$runtime/onnxruntime.dll","$runtime/DirectML.dll" -Destination "$build/Release" -Force
-$env:PATH = "$runtime;$QtSdk/bin;$env:PATH"
-$env:QT_PLUGIN_PATH = "$QtSdk/plugins"
-$env:QT_QPA_PLATFORM = 'offscreen'
-if (!$env:QT_QPA_FONTDIR) { $env:QT_QPA_FONTDIR = Join-Path $env:SystemRoot 'Fonts' }
+$previousPath, $previousPlugins = $env:PATH, $env:QT_PLUGIN_PATH
+$previousPlatform, $previousFonts = $env:QT_QPA_PLATFORM, $env:QT_QPA_FONTDIR
 $previousTemp, $previousTmp = $env:TEMP, $env:TMP
 try {
+    $env:PATH = "$runtime;$QtSdk/bin;$env:PATH"
+    $env:QT_PLUGIN_PATH = "$QtSdk/plugins"
+    $env:QT_QPA_PLATFORM = 'offscreen'
+    if (!$env:QT_QPA_FONTDIR) { $env:QT_QPA_FONTDIR = Join-Path $env:SystemRoot 'Fonts' }
     $env:TEMP = $env:TMP = Join-Path $build 'test-temp'
     [void][IO.Directory]::CreateDirectory($env:TEMP)
     Invoke-Checked (Join-Path (Split-Path $cmake) 'ctest.exe') @('--test-dir',$build,'-C','Release','--output-on-failure')
 } finally {
+    $env:PATH, $env:QT_PLUGIN_PATH = $previousPath, $previousPlugins
+    $env:QT_QPA_PLATFORM, $env:QT_QPA_FONTDIR = $previousPlatform, $previousFonts
     $env:TEMP, $env:TMP = $previousTemp, $previousTmp
 }
 if ($flatBuild) {
