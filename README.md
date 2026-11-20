@@ -4,13 +4,13 @@
 
 ## 构建
 
-**掌机**使用 devkitARM、libctru、3dsxtool、smdhtool、makerom 和 GNU Make。在已设置 `DEVKITPRO`、`DEVKITARM` 和 `PATH` 的 devkitPro shell 中运行 `make handheld`。Windows 也可以从 PowerShell 运行以下命令。
+**掌机**使用 devkitARM、libctru、3dsxtool、smdhtool、bannertool、makerom、GNU Make 和 Python 3。在已设置 `DEVKITPRO`、`DEVKITARM` 和 `PATH` 的 devkitPro shell 中运行 `make handheld`。Windows 也可以从 PowerShell 运行以下命令。
 
 ```powershell
 .\scripts\build-handheld.ps1 -Sdk D:\devkitPro -Bash D:\devkitPro\msys2\usr\bin\bash.exe
 ```
 
-产物在 `dist/SD`。系统模块和 Homebrew Launcher 启动器均由本项目编译。可选配置模板随 SD 包分发。使用本机的 C 编译器运行 `make test` 可检查协议、编解码和发现租约。
+掌机端产物为 `dist/3ds-live.3dsx` 和 `dist/3ds-live.cia`。两者都在 RomFS 中携带本次构建的系统模块。用户任选一个，首次启动时会安装模块，升级时会检查并更新模块。使用本机的 C 编译器运行 `make test` 可检查协议、编解码和发现租约。
 
 **Windows**使用 PowerShell 7、Visual Studio C++ x64、CMake、Qt 6 MSVC x64 和 7-Zip。标准包使用 DirectML。构建脚本下载并校验固定版本的依赖，校验模型，生成播放器并运行 Qt 测试。模型可取自本项目二进制包中的 `Windows/runtime/models`。在已有本地构建缓存时可省略 `-Models`。[Qt 播放器说明](live/qt/README.md)
 
@@ -19,7 +19,7 @@
 .\scripts\package.ps1
 ```
 
-本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。掌机 SD 卡所需文件在 `dist/SD`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。完整包的发布版本取自项目根目录的 `VERSION`，播放器版本取自 `live/qt/CMakeLists.txt`。
+本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。完整 ZIP 包含 Windows 绿色版、可直接安装的 CIA，以及按 SD 卡路径放置的 3DSX 和可选配置模板。完整包的发布版本取自项目根目录的 `VERSION`，播放器版本取自 `live/qt/CMakeLists.txt`。
 
 本机工作副本在 `.git/info/3ds-live-desktop-output` 保留一个空目录，供 PowerShell 在清理 `dist` 后恢复发布目录的 NTFS 完整性标签。新建的 `dist/Windows` 仍从当前父目录继承访问权限。其他工作副本按默认方式创建输出目录。
 
@@ -29,7 +29,7 @@
 
 | 目录 | 职责 |
 | --- | --- |
-| `app/` | 启动指定的 Live 系统模块，显示就绪信息 |
+| `app/` | 安装和启动内置的 Live 系统模块，显示就绪或重启提示 |
 | `sysmod/` | 游戏中热键、双屏与 DSP 混音采集、UDP 发现和发送 |
 | `codec/` | 直播编解码、分片、纠错、码率及发现报文 |
 | `live/qt/` | Qt/C++ 接收、播放、画质增强、诊断、RTSP 和 PC 端 MP4 输出 |

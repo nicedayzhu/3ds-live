@@ -24,8 +24,19 @@ all: $(NAME).cxi
 $(NAME).cxi: $(BUILD)/module.elf 3dslive.rsf
 	makerom -f ncch -rsf 3dslive.rsf -o $@ -elf $<
 
-$(BUILD)/module.elf: $(OBJECTS)
+$(BUILD)/module.elf: $(OBJECTS) $(BUILD)/module_id.o
 	$(CC) $(LDFLAGS) $^ -L$(CTRULIB)/lib -lctru -lm -o $@
+
+# The launcher must distinguish the module in memory from the one now on SD,
+# including two locally rebuilt modules with the same release version.
+$(BUILD)/module_id.h: $(OBJECTS) 3dslive.rsf $(CTRULIB)/lib/libctru.a
+	@sha256sum $^ > $@.inputs
+	@sha256sum $@.inputs > $@.digest
+	@read digest rest < $@.digest && printf '#define LIVE_MODULE_BUILD_ID "%s"\n' "$$digest" > $@.tmp
+	@mv $@.tmp $@
+
+$(BUILD)/module_id.o: $(BUILD)/module_id.h
+$(BUILD)/module_id.o: CPPFLAGS += -I$(BUILD)
 
 $(BUILD)/live_jpeg.o $(BUILD)/live_jpeg_source.o $(BUILD)/live_codec.o: CFLAGS += -O3
 $(BUILD)/%.o: %.c Makefile | $(BUILD)

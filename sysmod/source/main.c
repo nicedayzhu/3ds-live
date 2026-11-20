@@ -8,6 +8,8 @@
 #include "live_timing.h"
 #include "status_led.h"
 
+extern const char live_module_build_id[];
+
 // This is a system title with no APT foreground session. Initialize only its own heap, SRV and SD.
 extern char *fake_heap_start, *fake_heap_end;
 extern u32 __ctru_heap, __ctru_heap_size, __ctru_linear_heap, __ctru_linear_heap_size;
@@ -155,8 +157,8 @@ static void update_status(ModuleState state, Result result, LedState light)
     if (file) {
         u32 pid = 0;
         svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
-        fprintf(file, "pid=%lu\nstate=%s\nresult=%08lx\nled=%s\nled_result=%08lx\n",
-                (unsigned long)pid, names[state], (unsigned long)(u32)result,
+        fprintf(file, "pid=%lu\nbuild=%s\nexit_if_idle=1\nstate=%s\nresult=%08lx\nled=%s\nled_result=%08lx\n",
+                (unsigned long)pid, live_module_build_id, names[state], (unsigned long)(u32)result,
                 lights[light], (unsigned long)(u32)ledResult);
         fclose(file);
     }
@@ -233,6 +235,7 @@ int main(void)
         srvSubscribe(0x214); // Lid closed.
         srvSubscribe(LIVE_LAUNCHER_OPENED);
         srvSubscribe(LIVE_LAUNCHER_CLOSED);
+        srvSubscribe(LIVE_EXIT_IF_IDLE);
     }
     LedState idleLight = LED_STATE_READY;
     Result startResult = 0;
@@ -244,6 +247,7 @@ int main(void)
             u32 note;
             if (R_FAILED(srvReceiveNotification(&note))) break;
             if (note == 0x100 || note == PTMNOTIFID_SHUTDOWN) { quit = true; break; }
+            if (note == LIVE_EXIT_IF_IDLE && !running && !resume) { quit = true; break; }
             if (note == LIVE_LAUNCHER_OPENED || note == LIVE_LAUNCHER_CLOSED) {
                 idleLight = note == LIVE_LAUNCHER_OPENED ? LED_STATE_READY : LED_STATE_OFF;
                 if (note == LIVE_LAUNCHER_OPENED && !running) startResult = 0;

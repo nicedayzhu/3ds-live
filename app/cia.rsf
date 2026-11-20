@@ -1,0 +1,79 @@
+# HOME Menu application. The streaming system module has a separate program ID.
+BasicInfo:
+  Title: "3DS Live"
+  CompanyCode: "00"
+  ProductCode: "CTR-H-3DSL"
+  Logo: Homebrew
+
+TitleInfo:
+  Category: Application
+  UniqueId: 0xF1D41
+
+RomFs:
+  RootPath: "build/romfs"
+
+Option:
+  UseOnSD: true
+  FreeProductCode: true
+  MediaFootPadding: false
+  EnableCrypt: false
+  EnableCompress: true
+
+SystemControlInfo:
+  StackSize: 0x8000
+  SaveDataSize: 0KB
+
+AccessControlInfo:
+  CoreVersion: 2
+  DescVersion: 2
+  ReleaseKernelMajor: "02"
+  ReleaseKernelMinor: "33"
+  MemoryType: Application
+  SystemMode: 64MB
+  SystemModeExt: Legacy
+  IdealProcessor: 0
+  AffinityMask: 1
+  Priority: 16
+  HandleTableSize: 0x100
+  CanShareDeviceMemory: true
+
+  FileSystemAccess:
+    - DirectSdmc
+    - DirectSdmcWrite
+  ServiceAccessControl:
+    - APT:U
+    - fs:USER
+    - gsp::Gpu
+    - hid:USER
+    - ns:s
+
+  # libctru start-up, UI and filesystem, plus the launcher's read-only PID lookup.
+  SystemCallAccess:
+    ControlMemory: 0x01
+    QueryMemory: 0x02
+    ExitProcess: 0x03
+    CreateThread: 0x08
+    ExitThread: 0x09
+    SleepThread: 0x0A
+    ReleaseMutex: 0x14
+    CreateEvent: 0x17
+    SignalEvent: 0x18
+    ClearEvent: 0x19
+    MapMemoryBlock: 0x1F
+    UnmapMemoryBlock: 0x20
+    CreateAddressArbiter: 0x21
+    ArbitrateAddress: 0x22
+    CloseHandle: 0x23
+    WaitSynchronization1: 0x24
+    WaitSynchronizationN: 0x25
+    DuplicateHandle: 0x27
+    GetSystemTick: 0x28
+    GetProcessInfo: 0x2B
+    ConnectToPort: 0x2D
+    SendSyncRequest: 0x32
+    OpenProcess: 0x33
+    GetResourceLimit: 0x38
+    GetResourceLimitLimitValues: 0x39
+    GetResourceLimitCurrentValues: 0x3A
+    Break: 0x3C
+    GetProcessList: 0x65

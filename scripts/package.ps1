@@ -19,13 +19,27 @@ foreach ($entry in $files.GetEnumerator()) {
     Copy-Item -LiteralPath $entry.Value -Destination $target -Force
 }
 $files['Windows/files.sha256'] = "$windows/files.sha256"
-$sdFiles = @('3ds/3ds-live/3ds-live.3dsx','luma/sysmodules/0004013000F1D402.cxi','3ds/3ds-live/live.ini.example')
-foreach ($name in $sdFiles) { $files["SD/$name"] = Join-Path "$dist/SD" $name }
-$module = [IO.File]::ReadAllBytes($files["SD/$($sdFiles[1])"])
+$files['SD/3ds/3ds-live/3ds-live.3dsx'] = "$dist/3ds-live.3dsx"
+$files['SD/3ds/3ds-live/live.ini.example'] = "$dist/SD/3ds/3ds-live/live.ini.example"
+$files['3ds-live.cia'] = "$dist/3ds-live.cia"
+$module = [IO.File]::ReadAllBytes("$dist/SD/luma/sysmodules/0004013000F1D402.cxi")
 if ($module.Length -lt 0x400 -or [Text.Encoding]::ASCII.GetString($module,0x100,4) -ne 'NCCH' -or
     [BitConverter]::ToUInt64($module,0x118) -ne 0x0004013000F1D402L) { throw 'Unexpected handheld module.' }
-$launcher = [IO.File]::ReadAllBytes($files["SD/$($sdFiles[0])"])
-if ([Text.Encoding]::ASCII.GetString($launcher,0,4) -ne '3DSX') { throw 'Unexpected handheld launcher.' }
+$launcher = [IO.File]::ReadAllBytes("$dist/3ds-live.3dsx")
+if ($launcher.Length -lt 0x2c -or [Text.Encoding]::ASCII.GetString($launcher,0,4) -ne '3DSX' -or
+    [BitConverter]::ToUInt16($launcher,4) -lt 0x2c) { throw 'Unexpected 3DSX header.' }
+$romfsOffset = [BitConverter]::ToUInt32($launcher,0x28)
+if ($romfsOffset -lt 0x2c -or $romfsOffset -ge $launcher.Length) { throw 'Missing 3DSX RomFS.' }
+$cia = [IO.File]::ReadAllBytes("$dist/3ds-live.cia")
+if ($cia.Length -lt 0x2020 -or [BitConverter]::ToUInt32($cia,0) -ne 0x2020) { throw 'Unexpected CIA header.' }
+# Latin-1 maps each byte to one character, so ordinal search checks the exact module contents.
+$moduleBytes = [Text.Encoding]::Latin1.GetString($module)
+if (![Text.Encoding]::Latin1.GetString($launcher,$romfsOffset,$launcher.Length - $romfsOffset).Contains($moduleBytes,[StringComparison]::Ordinal)) {
+    throw 'The standalone 3DSX does not embed the current module in its RomFS.'
+}
+if (![Text.Encoding]::Latin1.GetString($cia).Contains($moduleBytes,[StringComparison]::Ordinal)) {
+    throw 'The standalone CIA does not embed the current module.'
+}
 $root = [IO.Path]::GetFullPath($windows) + [IO.Path]::DirectorySeparatorChar
 foreach ($line in Get-Content -LiteralPath "$windows/files.sha256") {
     if ($line -notmatch '^([a-f0-9]{64})  (.+)$') { throw 'Invalid Windows files.sha256.' }
