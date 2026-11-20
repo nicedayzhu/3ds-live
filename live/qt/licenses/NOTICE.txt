@@ -1,0 +1,7 @@
+The Windows viewer dynamically links to Qt Core, Gui, Widgets, Network and the Windows platform, style and image plugins. Qt is copyright The Qt Company Ltd. and other contributors. The Qt binaries are provided under the GNU Lesser General Public License version 3, with the corresponding GNU General Public License version 3. Both license texts are in this directory. The shared Qt libraries and plugins next to the executable can be replaced independently.
+
+The Qt 6.10.3 kit used for this build corresponds to Qt Base v6.10.3.
+Source: https://download.qt.io/archive/qt/6.10/6.10.3/submodules/qtbase-everywhere-src-6.10.3.tar.xz
+Upstream source and third-party notices: https://code.qt.io/cgit/qt/qtbase.git/tree/?h=v6.10.3
+
+The app-local Microsoft Visual C++ runtime DLLs are redistributable components of Microsoft Visual Studio and are copyright Microsoft Corporation.

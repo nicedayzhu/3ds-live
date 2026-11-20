@@ -1,0 +1,9 @@
+# Optional. Rename to live.ini to override the built-in defaults.
+enabled=on
+host=auto
+port=8001
+fps=30
+bytes_per_second=800000
+audio=on
+compact_jpeg=on
+combined_fec=on

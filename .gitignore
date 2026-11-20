@@ -1,0 +1,11 @@
+/dist/
+**/build/
+/live/dist/
+__pycache__/
+*.py[cod]
+*.elf
+*.smdh
+*.3dsx
+*.cxi
+*.log
+/live/qt/models/
