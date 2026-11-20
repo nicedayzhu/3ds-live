@@ -1,20 +1,23 @@
 [CmdletBinding()]
-param([string]$OutputDirectory)
+param()
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $repo 'dist'
 $windows = Join-Path $dist 'Windows'
 $version = [regex]::Match((Get-Content -Raw "$repo/live/qt/CMakeLists.txt"), 'project\(three_ds_live_qt VERSION ([\d.]+)').Groups[1].Value
 if (!$version) { throw 'Could not read the 3DS Live version.' }
-$output = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { $dist }
-[void][IO.Directory]::CreateDirectory($output)
-$archive = Join-Path $output "3DS-Live-$version-Windows-x64-New3DS.zip"
+$archive = Join-Path $dist "3DS-Live-$version-Windows-x64-New3DS.zip"
 $files = [ordered]@{
     '使用指南.md' = "$repo/INSTALL.md"
     'LICENSE' = "$repo/LICENSE"
     'licenses/JPEGENC-LICENSE' = "$repo/third_party/JPEGENC/LICENSE"
-    'Windows/files.sha256' = "$windows/files.sha256"
 }
+foreach ($entry in $files.GetEnumerator()) {
+    $target = Join-Path $dist $entry.Key
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+    Copy-Item -LiteralPath $entry.Value -Destination $target -Force
+}
+$files['Windows/files.sha256'] = "$windows/files.sha256"
 $sdFiles = @('3ds/3ds-live/3ds-live.3dsx','luma/sysmodules/0004013000F1D402.cxi','3ds/3ds-live/live.ini.example')
 foreach ($name in $sdFiles) { $files["SD/$name"] = Join-Path "$dist/SD" $name }
 $module = [IO.File]::ReadAllBytes($files["SD/$($sdFiles[1])"])

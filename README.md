@@ -19,7 +19,7 @@
 .\scripts\package.ps1
 ```
 
-构建产物位于 `dist/Windows` 和 `dist/SD`。打包命令将两者合并为一个 ZIP，并逐项回读校验。压缩包及其 SHA-256 文件默认写入 `dist`。使用 `package.ps1 -OutputDirectory <本地发行目录>` 可将两者直接写入选定的文件夹。日常使用请将发布包完整解压到普通本地目录，双击其中的 `Windows/3DS-Live.exe`。若开发目录带有继承的低完整性标签，Windows 可能对其中的 EXE 提示安全确认。
+本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。掌机 SD 卡所需文件在 `dist/SD`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。
 
 编译可选的 NVIDIA 后端时，将 `CUDA_PATH` 指向 CUDA SDK，`TensorRT_ROOT` 指向 TensorRT SDK，再向 Qt 构建脚本传 `-TensorRT`。如需一并部署本机配套引擎和运行库，传 `-AccelerationDirectory <加速目录>`。通用 ZIP 携带 DirectML 模型，本机兼容的 TensorRT 文件可放在 `Windows/runtime/acceleration/`。
 
