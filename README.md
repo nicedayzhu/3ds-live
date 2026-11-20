@@ -27,6 +27,8 @@
 
 ## 源码
 
+Git 提交标题使用英文 `type(scope): summary`。例如 `fix(pc): restore video when an AI model fails`。范围用 `3ds`（掌机）、`pc`（播放器）或 `3ds-pc`（双端）。文档和构建改动分别用 `docs` 和 `build`。
+
 | 目录 | 职责 |
 | --- | --- |
 | `app/` | 安装和启动内置的 Live 系统模块，显示就绪或重启提示 |
