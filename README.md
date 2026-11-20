@@ -2,6 +2,8 @@
 
 在 Windows 上用 Qt 观看 New Nintendo 3DS 系列掌机的上下屏和立体声。掌机开始推流后通过局域网寻找播放器，双方交换发现报文，再通过单播传输音视频。播放器可以先于或晚于掌机启动。安装、旧版迁移和自动重连见[使用指南](INSTALL.md)。
 
+画质菜单提供 JPEG 去块和 2× 超分。各档位在真机推流录像中的文字表现、双屏耗时和及时完成的增强帧数见[双屏超分实测](live/docs/SUPER-RESOLUTION.md)。
+
 ## 构建
 
 **掌机**使用 devkitARM、libctru、3dsxtool、smdhtool、bannertool、makerom、GNU Make 和 Python 3。在已设置 `DEVKITPRO`、`DEVKITARM` 和 `PATH` 的 devkitPro shell 中运行 `make handheld`。Windows 也可以从 PowerShell 运行以下命令。
