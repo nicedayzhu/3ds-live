@@ -138,7 +138,17 @@ class Viewer final : public QWidget {
     QComboBox *fps, *rate, *motion, *scale, *rifePrecision = nullptr;
     QLineEdit *ip, *rtsp;
     QSpinBox *port;
-    QMap<QString, QAction *> pictures, motionChoices;
+    struct EffectChoice {
+        QString label, tip;
+        QAction *action = nullptr;
+        QStandardItem *item = nullptr;
+    };
+    QMap<QString, EffectChoice> pictures, motionChoices;
+    QJsonObject effects;
+    QLabel *effectMessage;
+    QDialogButtonBox *effectButtons;
+    QPushButton *reduceEffects, *retryEffects;
+    QAction *effectSettings = nullptr;
     QPointer<QFileDialog> saveDialog;
     live::DebugWindow *debug = nullptr;
     bool activateAfterFirstPaint = false;
@@ -241,7 +251,10 @@ class Viewer final : public QWidget {
             if (!backend.isEmpty() && !snapshot["motion_backend_fallback"].toString().isEmpty())
                 rows << QStringLiteral("RIFE 已回退   ·   F12 查看原因");
         }
-        if (showHint) rows << QStringLiteral("点击性能按钮固定   ·   右键复制截图");
+        if (showHint) {
+            rows << (effectSettings && effectSettings->isVisible() ? QStringLiteral("右键性能按钮打开「画面与补帧」或复制截图")
+                                                 : QStringLiteral("点击性能按钮固定   ·   右键复制截图"));
+        }
         performanceCard->setText(rows.join('\n'));
         int natural = 0;
         for (const auto &row : rows)
@@ -352,6 +365,75 @@ class Viewer final : public QWidget {
         settings->raise();
         settings->activateWindow();
     }
+    void openEffectSettings() {
+        settingsTabs->setCurrentIndex(1);
+        openSettings();
+    }
+    void updatePrecisionControl() {
+        const bool retryRife = effects.value("blocked_motion").toObject().contains("rife");
+        rifePrecision->setEnabled(retryRife || motion->currentData().toString() == "rife");
+        rifePrecision->setToolTip(retryRife ? QStringLiteral("更换精度后点「应用」可重新检测 RIFE。")
+                                             : QStringLiteral("选择 RIFE 的推理精度。应用后可悬停 ⓘ 查看实际后端与耗时。"));
+    }
+    void updateEffects(const QJsonObject &next) {
+        if (effects == next) return;
+        auto updateChoices = [&](const QMap<QString, EffectChoice> &choices, const QString &key) {
+            const auto oldBlocked = effects.value(key).toObject();
+            const auto blocked = next.value(key).toObject();
+            for (auto it = choices.cbegin(); it != choices.cend(); ++it) {
+                const QString reason = blocked.value(it.key()).toString();
+                if (oldBlocked.value(it.key()).toString() == reason) continue;
+                const auto &choice = it.value();
+                const bool enabled = reason.isEmpty();
+                const QString text = enabled ? choice.label : choice.label + QStringLiteral("（不可用）");
+                if (choice.action) {
+                    choice.action->setText(enabled ? text : text + QStringLiteral(" · ") + reason);
+                    choice.action->setToolTip(enabled ? choice.tip : reason);
+                    choice.action->setEnabled(enabled);
+                }
+                if (choice.item) {
+                    choice.item->setText(text);
+                    choice.item->setToolTip(reason);
+                    choice.item->setData(reason, Qt::AccessibleDescriptionRole);
+                    choice.item->setEnabled(enabled);
+                }
+            }
+        };
+        updateChoices(pictures, "blocked_picture");
+        updateChoices(motionChoices, "blocked_motion");
+        // Discard an unapplied choice if the running session just ruled it out.
+        const auto blockedMotion = next.value("blocked_motion").toObject();
+        if (blockedMotion.contains(motion->currentData().toString())) {
+            QString fallback = "off";
+            for (auto it = motionChoices.cbegin(); it != motionChoices.cend(); ++it)
+                if (it->action && it->action->isChecked() && it->action->isEnabled()) fallback = it.key();
+            motion->setCurrentIndex(motion->findData(fallback));
+        }
+        QString message = next.value("message").toString();
+        if (message.isEmpty()) {
+            QStringList reasons;
+            for (const auto &key : {"blocked_picture", "blocked_motion"}) {
+                const auto blocked = next.value(key).toObject();
+                for (auto it = blocked.begin(); it != blocked.end(); ++it)
+                    if (!it.value().toString().isEmpty()) reasons << it.value().toString();
+            }
+            reasons.removeDuplicates();
+            message = reasons.join('\n');
+        }
+        if (blockedMotion.contains("rife"))
+            message += QStringLiteral("\n更换 RIFE 推理精度后，点「应用」可重新检测。");
+        effectMessage->setText(message);
+        effectMessage->setVisible(!message.isEmpty());
+        const bool reduce = next.value("can_reduce").toBool();
+        const bool retry = next.value("can_retry").toBool();
+        reduceEffects->setVisible(reduce);
+        retryEffects->setVisible(retry);
+        effectButtons->setVisible(reduce || retry);
+        effectSettings->setVisible(!message.isEmpty() || reduce || retry);
+        effects = next;
+        updatePrecisionControl();
+        refreshCard();
+    }
     void makeSettings(const QJsonObject &o) {
         settings = new QDialog(this);
         settings->setWindowTitle("投屏设置");
@@ -392,6 +474,9 @@ class Viewer final : public QWidget {
         motion->addItem("关闭", "off");
         motion->addItem("DIS 光流", "flow");
         motion->addItem("RIFE AI", "rife");
+        auto *motionModel = qobject_cast<QStandardItemModel *>(motion->model());
+        for (int i = 0; i < motion->count(); ++i)
+            motionChoices.insert(motion->itemData(i).toString(), {motion->itemText(i), {}, nullptr, motionModel->item(i)});
         motion->setCurrentIndex(std::max(0, motion->findData(o["interpolate"].toString())));
         picture->addRow("运动补帧", motion);
         rifePrecision = new QComboBox(settings);
@@ -399,16 +484,31 @@ class Viewer final : public QWidget {
         rifePrecision->addItem("FP32 · 全精度（默认）", "fp32");
         rifePrecision->addItem("FP16 · 半精度", "fp16");
         rifePrecision->setCurrentIndex(o["rife_precision"].toString() == "fp16" ? 1 : 0);
-        rifePrecision->setToolTip("选择 RIFE 的推理精度。应用后可悬停 ⓘ 查看实际后端与耗时。");
         picture->addRow("RIFE 推理精度", rifePrecision);
-        rifePrecision->setEnabled(motion->currentData().toString() == "rife");
-        connect(motion, &QComboBox::currentIndexChanged, this, [this] {
-            rifePrecision->setEnabled(motion->currentData().toString() == "rife");
-        });
+        updatePrecisionControl();
+        connect(motion, &QComboBox::currentIndexChanged, this, &Viewer::updatePrecisionControl);
+        effectMessage = new QLabel(picturePage);
+        effectMessage->setObjectName("effectMessage");
+        effectMessage->setTextFormat(Qt::PlainText);
+        effectMessage->setWordWrap(true);
+        picture->addRow(effectMessage);
+        effectMessage->hide();
+        effectButtons = new QDialogButtonBox(picturePage);
+        reduceEffects = effectButtons->addButton("使用建议设置", QDialogButtonBox::ActionRole);
+        retryEffects = effectButtons->addButton("重新检测", QDialogButtonBox::ActionRole);
+        reduceEffects->setObjectName("reduceEffects");
+        retryEffects->setObjectName("retryEffects");
+        reduceEffects->setAutoDefault(false);
+        retryEffects->setAutoDefault(false);
+        connect(reduceEffects, &QPushButton::clicked, this, [this] { emitAction("reduce-effects"); });
+        connect(retryEffects, &QPushButton::clicked, this, [this] { emitAction("retry-effects"); });
+        picture->addRow(effectButtons);
+        effectButtons->hide();
         rtsp = new QLineEdit(o["rtsp"].toString(), settings);
         rtsp->setPlaceholderText("留空关闭发布");
         connection->addRow("RTSP 发布地址", rtsp);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, settings);
+        buttons->setObjectName("settingsButtons");
         buttons->button(QDialogButtonBox::Apply)->setText("应用");
         buttons->button(QDialogButtonBox::Close)->setText("关闭");
         layout->addWidget(buttons);
@@ -482,6 +582,11 @@ class Viewer final : public QWidget {
         copyShot->setShortcut(QKeySequence("Ctrl+Shift+C"));
         performance->setContextMenuPolicy(Qt::ActionsContextMenu);
         performance->addAction(copyShot);
+        effectSettings = new QAction("画面与补帧…", performance);
+        effectSettings->setObjectName("effectSettings");
+        effectSettings->setVisible(false);
+        performance->addAction(effectSettings);
+        connect(effectSettings, &QAction::triggered, this, &Viewer::openEffectSettings);
         addAction(copyShot);
         connect(copyShot, &QAction::triggered, this, [this] {
             bool visible = !performanceCard->isHidden();
@@ -552,7 +657,7 @@ class Viewer final : public QWidget {
                 a->setCheckable(true);
                 a->setChecked(o["mode"].toString() == id);
                 group->addAction(a);
-                pictures[id] = a;
+                pictures.insert(id, {a->text(), a->toolTip(), a});
                 connect(a, &QAction::triggered, this,
                         [this, id] { queue.append(QJsonObject{{"type", "mode"}, {"value", id}}); });
             }
@@ -561,6 +666,7 @@ class Viewer final : public QWidget {
         }
         if (o["motion"].toBool()) {
             auto *motionMenu = submenu("补帧", "motionMenu");
+            motionMenu->setToolTipsVisible(true);
             auto *group = new QActionGroup(motionMenu);
             for (int i = 0; i < motion->count(); ++i) {
                 const auto method = motion->itemData(i).toString();
@@ -571,14 +677,11 @@ class Viewer final : public QWidget {
                 a->setCheckable(true);
                 a->setChecked(method == motion->currentData().toString());
                 group->addAction(a);
-                motionChoices[method] = a;
+                motionChoices[method].action = a;
             }
             motionMenu->addSeparator();
             action(motionMenu, "开关补帧", Qt::Key_F, [this] { emitAction("motion"); });
-            action(motionMenu, "补帧设置…", {}, [this] {
-                settingsTabs->setCurrentIndex(1);
-                openSettings();
-            });
+            action(motionMenu, "补帧设置…", {}, [this] { openEffectSettings(); });
         }
         limitsMenu = submenu("帧率与码率", "limitsMenu");
         limitsMenu->addMenu(quickFps->menu());
@@ -622,6 +725,7 @@ class Viewer final : public QWidget {
         panel->setVisible(o["controls"].toBool(true));
         restore->setVisible(panel->isHidden());
         setRecording("idle", {}, {});
+        if (o.contains("effects")) updateEffects(o.value("effects").toObject());
         if (!o["record"].toBool()) {
             record->setDisabled(true);
             recordAction->setDisabled(true);
@@ -696,7 +800,7 @@ class Viewer final : public QWidget {
         }
         if (v.contains("motion")) {
             motion->setCurrentIndex(motion->findData(v["motion"].toString()));
-            if (auto *choice = motionChoices.value(v["motion"].toString())) choice->setChecked(true);
+            if (auto *choice = motionChoices.value(v["motion"].toString()).action) choice->setChecked(true);
         }
         if (v.contains("motion"))
             generationLabel(motion->currentData().toString());
@@ -705,7 +809,8 @@ class Viewer final : public QWidget {
         if (v.contains("scale"))
             updatePictureScale(v["mode"].toString(), v["scale"].toInt());
         if (v.contains("mode") && pictures.contains(v["mode"].toString()))
-            pictures[v["mode"].toString()]->setChecked(true);
+            pictures[v["mode"].toString()].action->setChecked(true);
+        if (v.contains("effects")) updateEffects(v.value("effects").toObject());
         if (v.contains("muted") && mute)
             mute->setText(v["muted"].toBool() ? "恢复声音" : "静音");
         if (v.contains("recording"))

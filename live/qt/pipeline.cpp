@@ -1,10 +1,15 @@
 #include "pipeline.h"
 namespace live {
+static bool needsPictureModel(const QString &mode) {
+    return usesFbcnn(mode) || mode == "gpu" || mode == "fast-detail" || mode == "sr";
+}
+
 Pipeline::Pipeline(Timeline &t, QString dir, int s, QString m, QString f, QString precision)
     : timeline(t), models(std::move(dir)), scale(s), mode(std::move(m)), motion(std::move(f)),
       rifePrecision(resolveRifePrecision(std::move(precision))) {
-    timeline.setPictureMode(mode, motion != "off");
-    preparing = mode != "off" && mode != "clean";
+    // Keep decoded pictures visible until the first enhanced picture is ready.
+    timeline.setPictureMode("off", motion != "off");
+    preparing = needsPictureModel(mode);
     decoder = std::thread(&Pipeline::decodeLoop, this);
     enhancer = std::thread(&Pipeline::enhanceLoop, this);
     interpolator = std::thread(&Pipeline::motionLoop, this);
@@ -24,23 +29,30 @@ Pipeline::~Pipeline() {
 void Pipeline::configure(QString m, QString f, int outputScale, QString precision) {
     std::lock_guard lock(mutex);
     precision = resolveRifePrecision(std::move(precision));
-    const bool pictureChanged = mode != m || motion != f || scale != outputScale;
+    const bool motionChanged = motion != f;
+    const bool pictureChanged = mode != m || motionChanged || scale != outputScale;
     if (pictureChanged) {
+        if (mode != m) {
+            preparing = needsPictureModel(m);
+            strictPicture = false;
+            error.clear();
+            fbcnnBackend.clear();
+            fbcnnFallback.clear();
+        }
         scale = outputScale;
         mode = std::move(m);
         motion = std::move(f);
         ++generation;
-        preparing = mode != "off" && mode != "clean";
-        timeline.setPictureMode(mode, motion != "off");
+        timeline.setPictureMode(strictPicture ? mode : QStringLiteral("off"), motion != "off");
         jobs.clear();
-        error.clear();
+        enhanceReady.notify_one();
     } else {
         if (precision == rifePrecision) return;
         if (motion == "rife") timeline.clearSynthetic();
     }
     const bool precisionChanged = precision != rifePrecision;
     rifePrecision = std::move(precision);
-    if (precisionChanged) {
+    if (precisionChanged || motionChanged) {
         rifeBackend.clear();
         rifeFallback.clear();
     }
@@ -114,7 +126,7 @@ void Pipeline::decodeLoop() {
             return;
         Packet packet = std::move(pending.front());
         pending.pop_front();
-        const bool needOriginal = !usesFbcnn(mode);
+        const bool needOriginal = !strictPicture;
         const int outputScale = scale.load();
         lock.unlock();
         const auto decodeStart = clockUs();
@@ -163,7 +175,7 @@ void Pipeline::decodeLoop() {
         if (sessionEpoch != packet.sessionEpoch) continue;
         timeline.put(packet.source, original, {}, false, packet.pair.fps);
         ++decoded;
-        if (mode != "off" || motion != "off") {
+        if ((mode != "off" || motion != "off") && error.isEmpty()) {
             if (!jobs.empty() && jobs.back().source.pts == packet.source.pts)
                 jobs.pop_back();
             if (jobs.size() == 4) {
@@ -177,11 +189,11 @@ void Pipeline::decodeLoop() {
     }
 }
 void Pipeline::enhanceLoop() {
-    Imaging ai(models);
+    std::unique_ptr<Imaging> ai;
     Images last, output, previousOutput, nativeRestored, previousMotionInput;
     DeviceImages motionDevice, previousDevice;
     std::optional<Job> prev;
-    int lastGen = -1, failedGen = -1;
+    int lastGen = -1;
     std::array<int, 2> previousQuality{};
     auto panelChanged = [&](const Job &job, int i) {
         return job.generation != lastGen || job.images[i].cacheKey() != last[i].cacheKey() ||
@@ -190,32 +202,41 @@ void Pipeline::enhanceLoop() {
     QImage restored;
     // Separate budgets for changing the upper screen, lower screen, or both in parallel.
     std::array<double, 4> restoreUs{0., 20000., 16000., 36000.};
-    // Compile the two device-specific graphs on the inference thread while the sender connects.
-    QString initialMode;
-    {
-        std::lock_guard lock(mutex);
-        initialMode = mode;
-    }
-    if (usesFbcnn(initialMode) || initialMode == "gpu" || initialMode == "fast-detail" || initialMode == "sr") {
-        try {
-            Images blank{QImage(400, 240, QImage::Format_RGB888), QImage(320, 240, QImage::Format_RGB888)};
-            for (auto &screen : blank)
-                screen.fill(Qt::black);
-            Images warm;
-            ai.restorePair(blank, warm, initialMode);
-        } catch (const std::exception &e) {
-            std::lock_guard lock(mutex);
-            if (generation == 0) {
-                error = QString::fromUtf8(e.what());
-                failedGen = 0;
-            }
-        }
-    }
     while (true) {
         std::unique_lock lock(mutex);
-        enhanceReady.wait(lock, [&] { return done || !jobs.empty(); });
+        enhanceReady.wait(lock, [&] { return done || preparing || !jobs.empty(); });
         if (done)
             return;
+        if (preparing) {
+            const auto requested = mode;
+            const int probeGeneration = generation;
+            lock.unlock();
+            try {
+                if (!ai) ai = std::make_unique<Imaging>(models);
+                Images blank{QImage(400, 240, QImage::Format_RGB888), QImage(320, 240, QImage::Format_RGB888)}, warm;
+                for (auto &screen : blank) screen.fill(Qt::black);
+                ai->restorePair(blank, warm, requested);
+                lock.lock();
+                if (generation == probeGeneration) {
+                    preparing = false;
+                    if (usesFbcnn(mode)) {
+                        fbcnnBackend = ai->fbcnnBackend();
+                        fbcnnFallback = ai->fbcnnFallback();
+                    }
+                }
+            } catch (const std::exception &e) {
+                const QString fallback = ai && usesFbcnn(requested) ? ai->fbcnnFallback() : QString{};
+                ai.reset();
+                lock.lock();
+                if (generation == probeGeneration) {
+                    preparing = false;
+                    fbcnnFallback = fallback;
+                    error = QString::fromUtf8(e.what());
+                    jobs.clear();
+                }
+            }
+            continue;
+        }
         // Preserve consecutive source images when they can meet their display deadline.
         // The two screens often update at different rates, so account for exact cache hits.
         while (jobs.size() > 1) {
@@ -243,8 +264,6 @@ void Pipeline::enhanceLoop() {
         jobs.pop_front();
         const bool shareDevice = current.mode == "fbcnn" && current.motion == "rife" && rifeBackend.startsWith("TensorRT");
         lock.unlock();
-        if (current.generation == failedGen)
-            continue;
         const qint64 start = clockUs();
         try {
             const bool hdRife = current.mode == "fbcnn-sr" && current.motion == "rife";
@@ -252,18 +271,20 @@ void Pipeline::enhanceLoop() {
             bool bottomChanged = panelChanged(current, 1);
             cache += int(!topChanged) + int(!bottomChanged);
             if (!shareDevice) motionDevice = {};
-            if (topChanged || bottomChanged) {
+            qint64 restoreElapsed = 0;
+            if (current.mode == "off") {
+                output = current.images;
+            } else if (topChanged || bottomChanged) {
                 auto begin = clockUs();
                 Images changed{topChanged ? current.images[0] : QImage{},
                                bottomChanged ? current.images[1] : QImage{}};
-                ai.restorePair(changed, output, current.mode, hdRife ? &nativeRestored : nullptr,
+                if (!ai) ai = std::make_unique<Imaging>(models);
+                ai->restorePair(changed, output, current.mode, hdRife ? &nativeRestored : nullptr,
                                shareDevice ? &motionDevice : nullptr, current.jpegQuality);
-                auto elapsed = clockUs() - begin;
-                restoreTotalUs += elapsed;
-                ++restoreCalls;
+                restoreElapsed = clockUs() - begin;
                 auto &estimate = restoreUs[int(topChanged) + 2 * int(bottomChanged)];
-                if (elapsed < 150000)
-                    estimate = .75 * estimate + .25 * elapsed;
+                if (restoreElapsed < 150000)
+                    estimate = .75 * estimate + .25 * restoreElapsed;
             }
             last = current.images;
             previousQuality = current.jpegQuality;
@@ -279,16 +300,23 @@ void Pipeline::enhanceLoop() {
                 if (generation != current.generation || current.source.session != latestSource.session)
                     continue;
                 if (current.mode != "off") {
+                    if (topChanged || bottomChanged) {
+                        restoreTotalUs += restoreElapsed;
+                        ++restoreCalls;
+                    }
+                    if (usesFbcnn(current.mode) && !strictPicture) {
+                        strictPicture = true;
+                        timeline.setPictureMode(current.mode, motion != "off", true);
+                    }
                     timeline.put(current.source, restored, current.mode);
                     ++enhanced;
                 }
-                preparing = false;
                 inferUs = clockUs() - start;
                 if (usesFbcnn(current.mode)) {
-                    fbcnnBackend = ai.fbcnnBackend();
-                    fbcnnFallback = ai.fbcnnFallback();
+                    fbcnnBackend = ai->fbcnnBackend();
+                    fbcnnFallback = ai->fbcnnFallback();
                 }
-                if (current.motion != "off" && prev && prev->source.session == current.source.session &&
+                if (current.motion != "off" && motionError.isEmpty() && prev && prev->source.session == current.source.session &&
                     prev->generation == current.generation && current.source.pts > prev->source.pts &&
                     current.source.pts - prev->source.pts <= 75000 && (topChanged || bottomChanged)) {
                     auto midpoint = current.source;
@@ -315,11 +343,20 @@ void Pipeline::enhanceLoop() {
             }
             prev = std::move(current);
         } catch (const std::exception &e) {
+            const QString fallback = ai && usesFbcnn(current.mode) ? ai->fbcnnFallback() : QString{};
+            ai.reset();
             if (!lock.owns_lock())
                 lock.lock();
-            if (generation == current.generation)
+            if (generation == current.generation) {
                 error = QString::fromUtf8(e.what());
-            failedGen = current.generation;
+                fbcnnBackend.clear();
+                fbcnnFallback = fallback;
+                jobs.clear();
+                if (strictPicture) {
+                    strictPicture = false;
+                    timeline.setPictureMode("off", motion != "off");
+                }
+            }
         }
     }
 }
@@ -327,12 +364,12 @@ void Pipeline::motionLoop() {
     std::unique_ptr<Imaging> imaging;
     QString imagingPrecision;
     bool rifeWarm = false;
-    int lastGeneration = -1, failedGeneration = -1;
+    int lastGeneration = -1;
     std::array<qint64, 2> estimates{};
     for (;;) {
         std::unique_lock lock(mutex);
         const auto needsWarmup = [&] {
-            return motion == "rife" && rifeBackend.isEmpty() && failedGeneration != motionGeneration;
+            return motion == "rife" && rifeBackend.isEmpty() && motionError.isEmpty();
         };
         motionReady.wait(lock, [&] { return done || pendingMotion.has_value() || needsWarmup(); });
         if (done)
@@ -359,18 +396,19 @@ void Pipeline::motionLoop() {
                 }
             } catch (const std::exception &e) {
                 lock.lock();
-                failedGeneration = startingGeneration;
                 if (motionGeneration == startingGeneration) {
                     motionError = QString::fromUtf8(e.what());
+                    pendingMotion.reset();
                     if (imaging) rifeFallback = imaging->rifeFallback();
                 }
+                lock.unlock();
+                imaging.reset();
+                rifeWarm = false;
             }
             continue;
         }
         auto job = std::move(*pendingMotion);
         pendingMotion.reset();
-        if (job.generation == failedGeneration)
-            continue;
         if (job.generation != lastGeneration)
             estimates = {};
         lastGeneration = job.generation;
@@ -380,7 +418,8 @@ void Pipeline::motionLoop() {
         const bool fineFlow = job.method == "flow" && budget >= std::max<qint64>(8000, estimates[1] + 2000);
         auto &estimate = estimates[int(fineFlow)];
         if (estimate >= budget) {
-            ++motionPredictedLate;
+            lock.lock();
+            if (job.generation == motionGeneration) ++motionPredictedLate;
             continue;
         }
         try {
@@ -424,12 +463,13 @@ void Pipeline::motionLoop() {
             }
             auto canvas = compose(halfway, job.scale);
             const auto elapsed = clockUs() - begin;
-            motionTimeUs = elapsed;
             estimate = (3 * estimate + std::min<qint64>(elapsed, 60000)) / 4;
             lock.lock();
             if (job.generation == motionGeneration) {
                 timeline.put(job.source, canvas, job.quality, true, 0, generatedMask);
                 ++interpolated;
+                motionTimeUs = elapsed;
+                motionWorkTotalUs += elapsed;
                 if (job.method == "rife") {
                     rifeBackend = imaging->rifeBackend();
                     rifeFallback = imaging->rifeFallback();
@@ -438,15 +478,17 @@ void Pipeline::motionLoop() {
         } catch (const std::exception &e) {
             if (!lock.owns_lock())
                 lock.lock();
-            failedGeneration = job.generation;
             if (motionGeneration == job.generation) {
                 motionError = QString::fromUtf8(e.what());
+                pendingMotion.reset();
                 if (job.method == "rife" && imaging) {
-                    rifeWarm = false;
-                    rifeBackend = imaging->rifeBackend();
+                    rifeBackend.clear();
                     rifeFallback = imaging->rifeFallback();
                 }
             }
+            lock.unlock();
+            imaging.reset();
+            rifeWarm = false;
         }
     }
 }
@@ -479,7 +521,9 @@ QJsonObject Pipeline::stats() {
             {"motion_quality_holds", guardedPairs.load()},
             {"motion_unchanged_holds", heldPairs.load()},
             {"motion_processing_ms", motionTimeUs.load() / 1000.},
+            {"motion_work_total_us", motionWorkTotalUs.load()},
             {"motion_error", motionError},
+            {"motion_preparing", motion == "rife" && rifeBackend.isEmpty() && motionError.isEmpty()},
             {"model_preparing", preparing && error.isEmpty()},
             {"model_error", error}};
 }

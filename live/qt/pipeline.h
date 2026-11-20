@@ -31,7 +31,7 @@ class Pipeline {
     std::atomic<int> scale;
     std::mutex mutex;
     std::condition_variable decodeReady, enhanceReady, motionReady;
-    bool done = false, preparing = false;
+    bool done = false, preparing = false, strictPicture = false;
     QString mode, motion, rifePrecision, error, motionError, fbcnnBackend, fbcnnFallback, rifeBackend, rifeFallback;
     int generation = 0, motionGeneration = 0, sessionEpoch = 0;
     std::deque<Packet> pending;
@@ -46,7 +46,7 @@ class Pipeline {
     std::atomic<qint64> decoded{0}, skipped{0}, invalid{0}, enhanced{0}, overwritten{0}, cache{0}, inferUs{0},
         interpolated{0}, motionReplaced{0}, motionPredictedLate{0}, motionTimeUs{0}, guardedPairs{0}, heldPairs{0},
         motionDeviceInputs{0},
-        decodeTotalUs{0}, restoreTotalUs{0}, composeTotalUs{0}, restoreCalls{0};
+        decodeTotalUs{0}, restoreTotalUs{0}, composeTotalUs{0}, restoreCalls{0}, motionWorkTotalUs{0};
     void decodeLoop();
     void enhanceLoop();
     void motionLoop();

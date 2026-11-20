@@ -43,7 +43,7 @@ static int checkRifePreferences() {
                 if (!dialog) continue;
                 auto *precision = dialog->findChild<QComboBox *>("rifePrecision");
                 auto *motion = dialog->findChild<QComboBox *>("motionMethod");
-                auto *buttons = dialog->findChild<QDialogButtonBox *>();
+                auto *buttons = dialog->findChild<QDialogButtonBox *>("settingsButtons");
                 auto *ip = dialog->findChild<QLineEdit *>("senderIp");
                 if (!precision || !motion || !buttons || !ip) break;
                 loaded = precision->currentData().toString() == expected && ip->text().isEmpty();
@@ -289,7 +289,114 @@ static int checkDiscovery(int argc, char **argv) {
     return exchange(second, probe, 200).isEmpty() ? 0 : 9;
 }
 
+static int checkPipelineCapabilities(int argc, char **argv) {
+    QCoreApplication app(argc, argv);
+    QTemporaryDir emptyModels;
+    if (!emptyModels.isValid()) return 1;
+    live::Timeline timeline(0);
+    live::Pipeline pipeline(timeline, emptyModels.path(), 1, "off", "off");
+    pipeline.configure("fbcnn", "rife", 1, "fp16");
+    auto failedWithoutStream = [&] {
+        auto s = pipeline.stats();
+        return !s["model_error"].toString().isEmpty() && !s["motion_error"].toString().isEmpty() &&
+               !s["model_preparing"].toBool() && !s["motion_preparing"].toBool();
+    };
+    if (!QTest::qWaitFor(failedWithoutStream, 5000)) return 2;
+    const auto firstFallback = pipeline.stats()["motion_backend_fallback"].toString();
+    if (!firstFallback.contains("DirectML FP16:") || !firstFallback.contains("DirectML:")) return 3;
+    // A stale saved preference or a driver failure must leave real video visible.
+    pipeline.resetSession(7);
+    live::Pair pair;
+    pair.screens = {jpeg(400, Qt::red), jpeg(320, Qt::blue)};
+    pipeline.submit(pair, timeline.arrival(7, 1, 0, live::clockUs()));
+    if (!QTest::qWaitFor([&] { return timeline.present().quality == "original"; }, 2000)) return 4;
+    pipeline.configure("clean", "off", 1, "fp16");
+    auto s = pipeline.stats();
+    if (!s["model_error"].toString().isEmpty() || !s["motion_error"].toString().isEmpty()) return 5;
+    pipeline.configure("fbcnn", "rife", 1, "fp16");
+    if (!QTest::qWaitFor(failedWithoutStream, 5000)) return 6;
+    s = pipeline.stats();
+    if (s["motion_backend_fallback"].toString() != firstFallback) return 7;
+    if (s["restored_pairs"].toInteger() || s["restore_total_us"].toInteger() ||
+        s["interpolated"].toInteger() || s["motion_work_total_us"].toInteger()) return 8;
+    return 0;
+}
+
+static int checkEffectsFallback() {
+    QTemporaryDir work;
+    if (!work.isValid()) return 1;
+    const QString stats = work.filePath("effects.jsonl");
+    QUdpSocket reserve;
+    if (!reserve.bind(QHostAddress::LocalHost, 0)) return 1;
+    const auto port = QByteArray::number(reserve.localPort());
+    reserve.close();
+    QList<QByteArray> args{"test_session", "--preview", "--sender", "127.0.0.1", "--port", port, "--mute",
+        "--enhance", "fbcnn", "--interpolate", "rife", "--models", work.path().toLocal8Bit(),
+        "--stats", stats.toLocal8Bit(), "--seconds", "12"};
+    QVector<char *> argv;
+    for (auto &arg : args) argv.append(arg.data());
+    int argc = int(argv.size());
+    argv.append(nullptr);
+    QApplication app(argc, argv.data());
+    auto choice = [](QMenu *menu, const QString &id) -> QAction * {
+        if (menu)
+            for (auto *a : menu->actions())
+                if (a->data().toString() == id) return a;
+        return nullptr;
+    };
+    bool retried = false, reenabled = false, fellBackAgain = false;
+    QTimer observe;
+    QObject::connect(&observe, &QTimer::timeout, &app, [&] {
+        for (QWidget *view : app.topLevelWidgets()) {
+            if (view->windowTitle() != "3DS Live") continue;
+            auto *pictures = view->findChild<QMenu *>("pictureMenu");
+            auto *methods = view->findChild<QMenu *>("motionMenu");
+            auto *fbcnn = choice(pictures, "fbcnn"), *clean = choice(pictures, "clean");
+            auto *rife = choice(methods, "rife"), *flow = choice(methods, "flow");
+            if (!fbcnn || fbcnn->isEnabled() || !rife || rife->isEnabled() ||
+                !clean || !clean->isChecked() || !flow || !flow->isChecked()) return;
+            if (!retried) {
+                auto *open = view->findChild<QAction *>("effectSettings");
+                auto *retry = view->findChild<QPushButton *>("retryEffects");
+                if (!open || !open->isVisible() || !retry) return;
+                open->trigger();
+                if (!retry->isVisible()) return;
+                QObject::connect(fbcnn, &QAction::changed, &app, [&, fbcnn] {
+                    if (fbcnn->isEnabled()) reenabled = true;
+                });
+                retried = true;
+                retry->click();
+            } else if (reenabled) {
+                fellBackAgain = true;
+                observe.stop();
+                // Let the next regular per-second stats record the selected and effective modes.
+                QTimer::singleShot(1200, &app, &QApplication::quit);
+            }
+            return;
+        }
+    });
+    observe.start(25);
+    if (runClient(app, 0) || !fellBackAgain) {
+        qWarning() << "Effect fallback retry" << retried << reenabled << fellBackAgain;
+        return 2;
+    }
+    QFile reports(stats);
+    if (!reports.open(QIODevice::ReadOnly)) return 3;
+    while (!reports.atEnd()) {
+        const auto report = QJsonDocument::fromJson(reports.readLine()).object();
+        if (report["requested_mode"] == "fbcnn" && report["requested_motion"] == "rife" &&
+            report["mode"] == "clean" && report["motion"] == "flow" &&
+            report["picture_failures"].toObject().contains("fbcnn") &&
+            report["motion_failures"].toObject().contains("rife")) return 0;
+    }
+    return 4;
+}
+
 int main(int testArgc, char **testArgv) {
+    if (testArgc == 2 && QByteArray(testArgv[1]) == "--effects-fallback")
+        return checkEffectsFallback();
+    if (testArgc == 2 && QByteArray(testArgv[1]) == "--pipeline-capabilities")
+        return checkPipelineCapabilities(testArgc, testArgv);
     if (testArgc == 2 && QByteArray(testArgv[1]) == "--discovery")
         return checkDiscovery(testArgc, testArgv);
     if (testArgc == 2 && QByteArray(testArgv[1]) == "--receiver-handover")

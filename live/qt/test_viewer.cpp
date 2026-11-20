@@ -288,7 +288,7 @@ int main(int argc, char **argv) {
     motion->setCurrentIndex(motion->findData("rife"));
     if (!precision->isEnabled()) return 34;
     precision->setCurrentIndex(precision->findData("fp16"));
-    dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Apply)->click();
+    dialog->findChild<QDialogButtonBox *>("settingsButtons")->button(QDialogButtonBox::Apply)->click();
     auto applied = actions();
     if (applied.size() != 1 || applied[0].toObject()["type"] != "apply" ||
         applied[0].toObject()["motion"] != "rife" || applied[0].toObject()["rife_precision"] != "fp16" ||
@@ -307,6 +307,45 @@ int main(int argc, char **argv) {
     if (!card->text().contains("推理失败") || card->text().contains("等待推理")) return 40;
     update(R"({"motion":"flow","rife_precision":"fp32"})");
     if (precision->isEnabled() || precision->currentData().toString() != "fp32") return 39;
+    auto *effectSettings = root->findChild<QAction *>("effectSettings");
+    auto *effectMessage = dialog->findChild<QLabel *>("effectMessage");
+    auto *reduce = dialog->findChild<QPushButton *>("reduceEffects");
+    auto *retry = dialog->findChild<QPushButton *>("retryEffects");
+    if (!effectSettings || !effectMessage || !reduce || !retry || effectSettings->isVisible() ||
+        !effectMessage->isHidden() || !info->actions().contains(effectSettings)) return 84;
+    const QString fbcnnTip = fbcnnAction->toolTip();
+    const int rifeRow = motion->findData("rife");
+    auto rifeEnabled = [&] { return motion->model()->flags(motion->model()->index(rifeRow, 0)).testFlag(Qt::ItemIsEnabled); };
+    motion->setCurrentIndex(rifeRow); // A pending selection is invalidated before the user hits Apply.
+    update(R"({"effects":{"blocked_picture":{"fbcnn":"缺少 FBCNN 模型"},"blocked_motion":{"rife":"RIFE 初始化失败"},"message":"已切换到 DIS 光流","can_retry":true}})");
+    effectSettings->trigger();
+    if (!dialog->isVisible() || tabs->currentIndex() != 1 || !effectMessage->isVisible() ||
+        !effectMessage->text().contains("DIS") || !retry->isVisible() || reduce->isVisible()) return 85;
+    if (fbcnnAction->isEnabled() || rifeAction->isEnabled() || rifeEnabled() ||
+        !fbcnnAction->text().contains("不可用") || !fbcnnAction->text().contains("缺少 FBCNN 模型") ||
+        !rifeAction->toolTip().contains("初始化失败") || !motion->itemText(rifeRow).contains("不可用") ||
+        !motion->itemData(rifeRow, Qt::ToolTipRole).toString().contains("初始化失败") ||
+        !flowAction->isEnabled() || motion->currentData() != "flow" || !precision->isEnabled() ||
+        !effectMessage->text().contains("更换 RIFE 推理精度")) return 86;
+    dialog->hide();
+    update(R"({"status":"等待 3DS"})");
+    effectSettings->trigger();
+    retry->click();
+    if (!effectMessage->isVisible() || actions() != QJsonArray{QJsonObject{{"type", "retry-effects"}}}) return 87;
+    precision->setCurrentIndex(precision->findData("fp16"));
+    dialog->findChild<QDialogButtonBox *>(QStringLiteral("settingsButtons"))->button(QDialogButtonBox::Apply)->click();
+    const auto precisionChange = actions();
+    if (precisionChange.size() != 1 || precisionChange[0].toObject()["motion"] != "flow" ||
+        precisionChange[0].toObject()["rife_precision"] != "fp16") return 91;
+    effectSettings->trigger();
+    update(R"({"effects":{"message":"本机画面处理较慢","can_reduce":true}})");
+    if (!fbcnnAction->isEnabled() || !rifeAction->isEnabled() || !rifeEnabled() ||
+        fbcnnAction->toolTip() != fbcnnTip || fbcnnAction->text() != "FBCNN 高画质" ||
+        motion->itemText(rifeRow) != "RIFE AI" || !reduce->isVisible() || retry->isVisible()) return 88;
+    reduce->click();
+    if (actions() != QJsonArray{QJsonObject{{"type", "reduce-effects"}}}) return 89;
+    update(R"({"effects":{}})");
+    if (reduce->isVisible() || retry->isVisible() || effectMessage->isVisible() || effectSettings->isVisible()) return 90;
     live::destroyView(view);
     return 0;
 }

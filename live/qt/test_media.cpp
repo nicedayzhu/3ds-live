@@ -1,4 +1,5 @@
 #include "recording.h"
+#include "effect_load.h"
 #include <QtTest>
 #include <QtEndian>
 #include <windows.h>
@@ -52,6 +53,31 @@ static void verifyOutput(const QString &path, bool expectSuccess) {
 class MediaTests : public QObject {
     Q_OBJECT
   private slots:
+    void onlySustainedLocalInferenceOverloadRecommendsReducingEffects() {
+        EffectLoad load;
+        qint64 t = 1000000, calls = 0, us = 0, skips = 0;
+        auto sample = [&](int callCount, int costPerCall, int skipped, double receivedFps = 30.) {
+            t += 1000000;
+            calls += callCount;
+            us += callCount * costPerCall;
+            skips += skipped;
+            return load.observe(t, calls, us, skips, receivedFps);
+        };
+        QVERIFY(!sample(0, 0, 0));
+        for (int i = 0; i < 4; ++i) QVERIFY(!sample(5, 45000, 5, 8.)); // sparse arrivals
+        for (int i = 0; i < 4; ++i) QVERIFY(!sample(20, 10000, 8)); // backlog elsewhere
+        for (int i = 0; i < 4; ++i) QVERIFY(!sample(20, 40000, 0)); // still meeting deadlines
+        QVERIFY(!sample(20, 40000, 8));
+        QVERIFY(!sample(20, 40000, 8));
+        QVERIFY(sample(20, 40000, 8));
+        QVERIFY(sample(20, 10000, 0));
+        QVERIFY(sample(20, 10000, 0));
+        QVERIFY(!sample(20, 10000, 0));
+        QVERIFY(!sample(0, 0, 20));
+        QVERIFY(!sample(0, 0, 20));
+        QVERIFY(sample(1, 2700000, 20)); // one real completion across three windows
+        QVERIFY(!sample(0, 0, 0, 0.));  // disconnect
+    }
     void missingAudioFadesOnlyInsideTheGap() {
         Timeline timeline(0);
         timeline.reset(1);
@@ -480,6 +506,26 @@ class MediaTests : public QObject {
         for (auto e : t.diagnostics.window(clockUs()))
             late |= e.toObject()["event"].toString() == "late";
         QVERIFY(late);
+    }
+    void firstEnhancedFrameTakesOverWithoutClearingThePreview() {
+        Timeline timeline(10);
+        timeline.reset(9);
+        QImage picture(400, 480, QImage::Format_RGB888);
+        picture.fill(Qt::blue);
+        const qint64 origin = clockUs() - 500000;
+        auto first = timeline.arrival(9, 1, 0, origin);
+        timeline.put(first, picture);
+        const auto raw = timeline.present();
+        QCOMPARE(raw.quality, QString("original"));
+        timeline.setPictureMode("fbcnn", false, true);
+        auto second = timeline.arrival(9, 2, 33000, origin + 33000);
+        timeline.put(second, picture);
+        QCOMPARE(timeline.present().id, raw.id);
+        timeline.put(second, picture, "fbcnn");
+        QCOMPARE(timeline.present().quality, QString("fbcnn"));
+        auto third = timeline.arrival(9, 3, 66000, origin + 66000);
+        timeline.put(third, picture);
+        QCOMPARE(timeline.present().source.sequence, 2u);
     }
     void fbcnnNeverShowsRawEvenAfterDeadline() {
         Timeline timeline(5);

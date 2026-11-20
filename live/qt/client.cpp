@@ -4,6 +4,7 @@
 #include "receiver.h"
 #include "recording.h"
 #include "model_check.h"
+#include "effect_load.h"
 #include <QtWidgets>
 using namespace live;
 static const QMap<QString, QString> labels = {{"off", "原始"},
@@ -48,6 +49,11 @@ static bool validIp(const QString &ip) {
 }
 static bool validRtsp(const QString &url) {
     return url.isEmpty() || (QUrl(url).scheme() == "rtsp" && !QUrl(url).host().isEmpty());
+}
+static QString effectFailureSummary(const QString &error) {
+    if (error.contains(QStringLiteral("缺少模型")))
+        return QStringLiteral("缺少模型文件，请检查 runtime/models");
+    return QStringLiteral("推理失败，可在 F12 查看后端错误");
 }
 int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     configureOpenCV();
@@ -228,6 +234,11 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     qint64 lastStats = 0, lastImage = 0, painted = 0, lastPaint = 0, maxPaint = 0;
     QString oldState, recordError, lastMode = o.mode == "off" ? "fbcnn" : o.mode,
                                    lastMotion = o.motion == "off" ? "flow" : o.motion;
+    QString requestedMode = o.mode, requestedMotion = o.motion;
+    QJsonObject pictureFailures, motionFailures;
+    EffectLoad pictureLoad, motionLoad;
+    bool pictureBusy = false, motionBusy = false;
+    qint64 loadSession = -1;
     qint64 lastPts = std::numeric_limits<qint64>::min(), presented = 0, onTime = 0, intermediate = 0,
            lastPresentWall = 0, largestGap = 0;
     qint64 lastSourceWall = 0, sourceBucketGap = 0;
@@ -256,8 +267,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         prefs.setValue("port", o.port);
         prefs.setValue("fps", o.fps);
         prefs.setValue("rate", o.rate);
-        prefs.setValue("mode", o.mode);
-        prefs.setValue("motion", o.motion);
+        prefs.setValue("mode", requestedMode);
+        prefs.setValue("motion", requestedMotion);
         prefs.setValue("scale", o.scale);
         prefs.setValue("muted", o.mute);
     };
@@ -265,12 +276,48 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         toast = text;
         toastUntil = clockUs() + 5000000;
     };
+    auto motionLabel = [](const QString &method) {
+        return method == "rife" ? QStringLiteral("RIFE") : method == "flow" ? QStringLiteral("DIS 光流") : QStringLiteral("关闭补帧");
+    };
+    auto lighterMode = [&] {
+        return o.mode == "clean" || pictureFailures.contains("clean") ? QStringLiteral("off") : QStringLiteral("clean");
+    };
+    auto lighterMotion = [&] {
+        return o.motion == "flow" || motionFailures.contains("flow") ? QStringLiteral("off") : QStringLiteral("flow");
+    };
+    auto publishEffects = [&] {
+        QJsonObject pictures, motions;
+        QStringList lines;
+        for (auto it = pictureFailures.begin(); it != pictureFailures.end(); ++it) {
+            pictures[it.key()] = effectFailureSummary(it.value().toString());
+            lines << labels.value(it.key()) + " · " + pictures.value(it.key()).toString();
+        }
+        for (auto it = motionFailures.begin(); it != motionFailures.end(); ++it) {
+            motions[it.key()] = effectFailureSummary(it.value().toString());
+            lines << motionLabel(it.key()) + " · " + motions.value(it.key()).toString();
+        }
+        if (o.mode != requestedMode) lines << "当前画质：" + labels.value(o.mode);
+        if (o.motion != requestedMotion) lines << "当前补帧：" + motionLabel(o.motion);
+        if (pictureBusy) lines << "本机画质处理持续赶不上收帧，建议切换到" + labels.value(lighterMode()) + "。";
+        if (motionBusy) lines << "本机补帧持续超时，建议使用：" + motionLabel(lighterMotion()) + "。";
+        updateView(view, {{"effects", QJsonObject{{"blocked_picture", pictures}, {"blocked_motion", motions},
+            {"message", lines.join('\n')}, {"can_reduce", pictureBusy || motionBusy},
+            {"can_retry", !pictures.isEmpty() || !motions.isEmpty()}}}});
+    };
     auto configurePicture = [&] {
-        if (o.motion != "off") lastMotion = o.motion;
+        o.mode = requestedMode;
+        if (pictureFailures.contains(o.mode)) o.mode = lighterMode();
+        o.motion = requestedMotion;
+        if (motionFailures.contains(o.motion)) o.motion = lighterMotion();
+        if (requestedMode != "off") lastMode = requestedMode;
+        if (requestedMotion != "off") lastMotion = requestedMotion;
         o.scale = pictureScale(o.mode, o.scale);
         pipeline.configure(o.mode, o.motion, o.scale, o.rifePrecision);
         updateView(view, {{"mode", o.mode}, {"scale", o.scale}, {"motion", o.motion}, {"rife_precision", o.rifePrecision}});
         fallbackWindows = 0;
+        pictureLoad = motionLoad = {};
+        pictureBusy = motionBusy = false;
+        publishEffects();
         remember();
     };
     QObject::connect(&timer, &QTimer::timeout, &app, [&] {
@@ -321,9 +368,10 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                 if (scale != o.scale || motion != o.motion || precision != o.rifePrecision) {
                     if (interactive && precision != o.rifePrecision)
                         prefs.setValue("rifePrecision", precision);
+                    if (precision != o.rifePrecision) motionFailures.remove("rife");
+                    if (motion != o.motion) requestedMotion = motion;
                     o.rifePrecision = precision;
                     o.scale = scale;
-                    o.motion = motion;
                     configurePicture();
                 }
                 if (url != o.rtsp) {
@@ -338,6 +386,18 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             }
             if (type == "retry")
                 listen();
+            if (type == "retry-effects") {
+                pictureFailures = {};
+                motionFailures = {};
+                configurePicture();
+                notify("已恢复效果选项，将重新检测选用的模式");
+            }
+            if (type == "reduce-effects" && (pictureBusy || motionBusy)) {
+                if (pictureBusy) requestedMode = lighterMode();
+                if (motionBusy) requestedMotion = lighterMotion();
+                configurePicture();
+                notify("已应用较轻的画面设置");
+            }
             if (type == "mute") {
                 o.mute = !o.mute;
                 speaker.mute = o.mute;
@@ -346,19 +406,21 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             }
             if (type == "mode" || type == "motion" || type == "enhance") {
                 if (type == "mode")
-                    o.mode = e["value"].toString();
+                    requestedMode = e["value"].toString();
                 if (type == "enhance") {
                     if (o.mode == "off")
-                        o.mode = lastMode;
+                        requestedMode = pictureFailures.contains(lastMode) ? lighterMode() : lastMode;
                     else {
-                        lastMode = o.mode;
-                        o.mode = "off";
+                        lastMode = requestedMode;
+                        requestedMode = "off";
                     }
                 }
                 if (type == "motion") {
                     const QString method = e.value("value").toString(o.motion == "off" ? lastMotion : QStringLiteral("off"));
-                    if (method == o.motion || (method != "off" && method != "flow" && method != "rife")) continue;
-                    o.motion = method;
+                    if (method != "off" && method != "flow" && method != "rife") continue;
+                    const QString next = motionFailures.contains(method) ? lighterMotion() : method;
+                    if (next == requestedMotion) continue;
+                    requestedMotion = next;
                 }
                 configurePicture();
             }
@@ -466,6 +528,25 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         double interval = lastStats ? (now - lastStats) / 1e6 : 1.;
         lastStats = now;
         auto report = receiver->stats(), processing = pipeline.stats();
+        const auto pictureError = processing["model_error"].toString();
+        const auto motionError = processing["motion_error"].toString();
+        QStringList failedEffects;
+        if (o.mode != "off" && !pictureError.isEmpty()) {
+            failedEffects << labels.value(o.mode);
+            pictureFailures[o.mode] = pictureError;
+        }
+        if (o.motion != "off" && !motionError.isEmpty()) {
+            failedEffects << motionLabel(o.motion);
+            motionFailures[o.motion] = motionError;
+        }
+        if (!failedEffects.isEmpty()) {
+            configurePicture();
+            QStringList replacements;
+            if (!pictureError.isEmpty()) replacements << labels.value(o.mode);
+            if (!motionError.isEmpty()) replacements << motionLabel(o.motion);
+            notify(failedEffects.join(" / ") + " 不可用，已切换为" + replacements.join(" / "));
+            processing = pipeline.stats();
+        }
         for (auto it = processing.begin(); it != processing.end(); ++it)
             report[it.key()] = it.value();
         const auto paintStats = takePaintStats(view);
@@ -508,6 +589,10 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         report["version"] = QCoreApplication::applicationVersion();
         report["mode"] = o.mode;
         report["motion"] = o.motion;
+        report["requested_mode"] = requestedMode;
+        report["requested_motion"] = requestedMotion;
+        if (!pictureFailures.isEmpty()) report["picture_failures"] = pictureFailures;
+        if (!motionFailures.isEmpty()) report["motion_failures"] = motionFailures;
         report["presented_changes"] = painted;
         report["max_visual_change_gap_ms"] = maxPaint / 1000.;
         report["playout_delay_ms"] = o.delay;
@@ -543,6 +628,26 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         const qint64 lastTop = report.value("last_top_us").toInteger(report["last_pair_us"].toInteger());
         bool hasFrame = lastTop > 0;
         bool frozen = hasFrame && now - lastTop > 1200000;
+        const auto session = report["session"].toInteger();
+        if (session != loadSession) {
+            pictureLoad = motionLoad = {};
+            loadSession = session;
+        }
+        const double liveFps = hasFrame && !frozen ? std::min(topReceived, double(o.fps)) : 0.;
+        const bool slowPicture = pictureLoad.observe(now, report["restored_pairs"].toInteger(),
+            report["restore_total_us"].toInteger(), report["enhancement_overwrites"].toInteger(),
+            o.mode != "off" && !report["model_preparing"].toBool() ? liveFps : 0.);
+        const bool slowMotion = motionLoad.observe(now, report["interpolated"].toInteger(),
+            report["motion_work_total_us"].toInteger(), report["motion_deadline_skips"].toInteger(),
+            o.motion != "off" && !report["motion_preparing"].toBool() ? liveFps : 0.);
+        if (slowPicture != pictureBusy || slowMotion != motionBusy) {
+            pictureBusy = slowPicture;
+            motionBusy = slowMotion;
+            publishEffects();
+            if (pictureBusy || motionBusy) notify("本机处理持续超时，可在画面与补帧设置中降低负载");
+        }
+        report["picture_over_budget"] = pictureBusy;
+        report["motion_over_budget"] = motionBusy;
         QString notice, quality;
         if (!report["socket_error"].toString().isEmpty()) {
             notice = QString("无法监听 UDP %1\n%2\n在菜单中重新监听或更改端口")
@@ -568,7 +673,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             if (!report["model_error"].toString().isEmpty())
                 quality = usesFbcnn(o.mode) ? "增强失败 · 可切换原始" : "增强失败 · 原始";
             else if (report["model_preparing"].toBool())
-                quality = "正在准备增强";
+                quality = im.isNull() ? "正在准备增强" : "正在准备增强 · 当前显示原图";
             else
                 quality =
                     labels.value(o.mode) + (!usesFbcnn(o.mode) && fallbackWindows >= 3 ? " · 部分原始帧" : "");

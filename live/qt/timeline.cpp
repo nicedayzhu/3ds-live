@@ -183,7 +183,7 @@ qint64 Timeline::deadline(SourceFrame source) const {
     std::lock_guard lock(mutex);
     return source.session == session ? source.pts + offset + delay : 0;
 }
-void Timeline::setPictureMode(const QString &mode, bool interpolate) {
+void Timeline::setPictureMode(const QString &mode, bool interpolate, bool keepDisplayed) {
     std::lock_guard lock(mutex);
     const bool strict = usesFbcnn(mode);
     lastEnhancedPts.reset();
@@ -198,7 +198,7 @@ void Timeline::setPictureMode(const QString &mode, bool interpolate) {
         requiredQuality = required;
         frames.clear();
         newSession = true;
-        if (strict && (choices.empty() || !matchesQuality(choices.back().quality, mode))) {
+        if (strict && !keepDisplayed && (choices.empty() || !matchesQuality(choices.back().quality, mode))) {
             PresentedFrame waiting{{}, {}, "waiting_fbcnn", false, now, ++nextChoice};
             choices.push_back(waiting);
             diagnostics.add({"clear", {}, now, 0, waiting.id, 0, waiting.quality});

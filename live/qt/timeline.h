@@ -62,7 +62,7 @@ class Timeline : public QObject {
     void put(SourceFrame source, const QImage &image, const QString &quality = {}, bool synthetic = false,
              int fps = 0, int generatedPanels = 3);
     qint64 deadline(SourceFrame source) const;
-    void setPictureMode(const QString &mode, bool interpolate = false);
+    void setPictureMode(const QString &mode, bool interpolate = false, bool keepDisplayed = false);
     void clearSynthetic();
     PresentedFrame present(int *nextWakeMs = nullptr);
     PresentedFrame recorded(qint64 wall) const;
