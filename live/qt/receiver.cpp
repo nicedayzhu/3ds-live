@@ -126,6 +126,7 @@ void Receiver::run() {
     constexpr int allFps = (1 << 15) | (1 << 20) | (1 << 24) | (1 << 30);
     std::optional<qint64> baseline;
     int lagMs = 0, severeIntervals = 0, pressureIntervals = 0;
+    int stallReports = 0, sourceFpsLimit = 30;
     std::array<int, 2> qualitySum{}, qualityCount{};
     std::array<qint64, 2> panelCount{}, beforePanelCount{};
     std::optional<quint32> lastBottomPts;
@@ -333,16 +334,21 @@ void Receiver::run() {
                 pipeline.resetSession(id);
                 assembler.reset();
                 recovery = {};
+                before = assembler.counts;
+                beforePanelCount = panelCount;
+                lastBytes = bytes;
+                tick = changed = now;
                 hz = cap = 0;
                 lastConfig = lastVideo = 0;
                 lastPairUs = intervalPairGap = 0;
                 baseline.reset();
-                lagMs = severeIntervals = pressureIntervals = 0;
+                lagMs = severeIntervals = pressureIntervals = stallReports = 0;
+                sourceFpsLimit = 30;
                 sentFps = 0;
                 qualitySum = qualityCount = {};
                 jpegWireBytes = compactScreens = fullJpegScreens = 0;
                 lastSent.reset();
-
+                seenRevision = revision.load();
                 effective = requestedRate.load();
                 stable = 0;
                 device = {};
@@ -351,12 +357,17 @@ void Receiver::run() {
                 deviceMax = 2000000;
                 mask = allFps;
             }
+            if (status && latestStatusMs && qint32(word(b, 1) - *latestStatusMs) <= 0)
+                continue;
             lastPacketUs = lastSeen = now;
             bytes += b.size() + 28;
             if (status) {
                 remote = senderPort;
+                const bool sameConfig = hz == int(word(b, 4)) && cap == int(word(b, 2));
                 hz = int(word(b, 4));
                 cap = int(word(b, 2));
+                deviceMax = b.size() >= 76 ? int(word(b, 16)) : 1000000;
+                mask = b.size() >= 76 ? int(word(b, 17)) : ((1 << 24) | (1 << 30));
                 const auto sent = word(b, 7), elapsed = word(b, 1);
                 std::optional<RecoveryCadence::Delivery> delivery;
                 // Only combined, equal-screen streams have one sent pair for every full pair.
@@ -364,16 +375,34 @@ void Receiver::run() {
                     delivery = RecoveryCadence::Delivery{elapsed, sent, word(b, 9) + word(b, 10),
                                                          assembler.counts.fullPairs};
                 recovery.confirm(hz, cap, now, delivery);
-                if (!latestStatusMs || qint32(elapsed - *latestStatusMs) > 0)
-                    latestStatusMs = elapsed;
+                latestStatusMs = elapsed;
+                if (!sameConfig) {
+                    lastSent.reset();
+                    stallReports = 0;
+                }
                 if (!lastSent || quint32(elapsed - lastProgressMs) >= 900) {
+                    const auto interval = elapsed - lastProgressMs;
                     if (lastSent)
-                        sentFps = quint32(sent - *lastSent) * 1000. / quint32(elapsed - lastProgressMs);
+                        sentFps = quint32(sent - *lastSent) * 1000. / interval;
+                    // Only consecutive reports at a confirmed low audio/video cap
+                    // can establish that no pair fits the current capture cadence.
+                    const bool stalled = lastSent && interval <= 2500 && sent == *lastSent &&
+                        cap == effective && cap <= 600000 && b.size() == 108 && word(b, 18);
+                    stallReports = stalled ? stallReports + 1 : 0;
+                    if (stallReports >= 2 && hz <= sourceFpsLimit) {
+                        for (int lower : {24, 20, 15}) {
+                            if (lower < hz && (mask & (1 << lower))) {
+                                sourceFpsLimit = lower;
+                                changed = now;
+                                stable = 0;
+                                break;
+                            }
+                        }
+                        stallReports = 0;
+                    }
                     lastProgressMs = elapsed;
                     lastSent = sent;
                 }
-                deviceMax = b.size() >= 76 ? int(word(b, 16)) : 1000000;
-                mask = b.size() >= 76 ? int(word(b, 17)) : ((1 << 24) | (1 << 30));
                 device = {{"capture_fps", hz},
                           {"device_status_us", now},
                           {"device_elapsed_ms", qint64(elapsed)},
@@ -421,7 +450,9 @@ void Receiver::run() {
             seenRevision = revision;
             recovery = {};
             effective = requestedRate.load();
-
+            sourceFpsLimit = 30;
+            stallReports = 0;
+            lastSent.reset();
             lastConfig = 0;
             pressureIntervals = severeIntervals = 0;
             stable = 0;
@@ -429,11 +460,8 @@ void Receiver::run() {
         }
         int target = std::min(requestedRate.load(), deviceMax);
         effective = std::min(effective, target);
-        const int limit = requestedFps.load();
-        int freq = hz;
-        for (int candidate : {15, 20, 24, 30})
-            if (candidate <= limit && (mask & (1 << candidate)))
-                freq = candidate;
+        const int freq = captureFps(std::min(requestedFps.load(), sourceFpsLimit), target, effective,
+                                    device.value("device_audio_enabled").toBool(), mask, hz);
         if (remote && current && now - lastConfig > 500000 && now - lastSeen < 2000000 && freq > 0 &&
             (hz != freq || cap != effective || !assembler.combined ||
              (splitSupported && splitActive))) {
@@ -471,7 +499,7 @@ void Receiver::run() {
         severeIntervals = severe && lost > 0 ? std::min(severeIntervals + 1, 2) : 0;
         if (congestion && now - changed >= 2000000) {
             // R7+ senders support 0.4 MB/s. Reserve that range for measured, sustained loss.
-            const int minimum = freq == 30 && device.value("device_audio_enabled").toBool() ? 500000 : 400000;
+            const int minimum = requestedFps.load() == 30 && device.value("device_audio_enabled").toBool() ? 500000 : 400000;
             int deviceFloor = deviceMax > 1000000 ? (severeIntervals == 2 ? minimum : 600000) : 700000;
             // A short fade can erase many fragments while the sender is still
             // delivering nearly all 30 pairs. Reserve multi-step reductions
@@ -502,6 +530,16 @@ void Receiver::run() {
                     stable = 0;
                     break;
                 }
+        if (stable >= 15 && now - changed >= 20000000 && effective == target && sourceFpsLimit < requestedFps.load()) {
+            for (int higher : {20, 24, 30}) {
+                if (higher > sourceFpsLimit && higher <= requestedFps.load() && (mask & (1 << higher))) {
+                    sourceFpsLimit = higher;
+                    stable = 0;
+                    changed = now;
+                    break;
+                }
+            }
+        }
         if (current && remote && now - lastSeen < 2000000)
             socket.writeDatagram(
                 message("R3FB", {*current, quint32(now / 1000), quint32(c.packets), quint32(c.complete * 2),

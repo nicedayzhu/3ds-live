@@ -190,7 +190,40 @@ static int checkReceiverHandover(int argc, char **argv) {
         qWarning() << "Unexpected R15 statistics" << splitStats;
         return 9;
     }
-    return splitCommand(0, 1) ? 0 : 10;
+    if (!splitCommand(0, 1)) return 10;
+
+    // An audio sender at a low cap can fail to fit a single pair. Its status
+    // has a monotonic device clock even when UDP reports arrive out of order.
+    constexpr unsigned supported = (1u << 20) | (1u << 30);
+    auto audioStatus = [&](unsigned session, unsigned elapsed, unsigned cap, unsigned sent) {
+        first.writeDatagram(live::message("R9ST", {session, elapsed, cap, cap - 100000, 30, sent, sent,
+            sent, sent, 0, 0, 0, 2, 3, 120, 180, 2000000, supported, 1, 32728498, 2, 160, 0, 0, 0, 0}),
+            local, port);
+    };
+    auto selected = [&](unsigned session, unsigned elapsed, int fps) {
+        const bool reached = QTest::qWaitFor([&] {
+            const auto report = receiver.stats();
+            return report["session"].toInteger() == session && report["device_elapsed_ms"].toInteger() == elapsed &&
+                   report["effective_fps"].toInt() == fps;
+        }, 1800);
+        if (!reached) qWarning() << "Capture cadence did not reach" << session << elapsed << fps << receiver.stats();
+        return reached;
+    };
+    receiver.configure(30, 600000);
+    audioStatus(82, 1000, 600000, 50);
+    if (!selected(82, 1000, 30)) return 11;
+    audioStatus(82, 2000, 600000, 50);
+    audioStatus(82, 1700, 600000, 50);
+    audioStatus(82, 2000, 600000, 50);
+    if (!selected(82, 2000, 30)) return 12;
+    audioStatus(82, 3000, 600000, 50);
+    if (!selected(82, 3000, 20)) return 13;
+    audioStatus(83, 1000, 600000, 50);
+    if (!selected(83, 1000, 30)) return 14;
+    receiver.configure(30, 800000);
+    for (unsigned i = 0; i < 4; ++i)
+        audioStatus(83, 2000 + i * 1000, 800000, 50);
+    return selected(83, 5000, 30) ? 0 : 15;
 }
 
 static int checkDiscovery(int argc, char **argv) {

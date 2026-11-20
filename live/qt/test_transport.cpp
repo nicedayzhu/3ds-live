@@ -12,6 +12,16 @@ static QByteArray packet(QByteArray magic, quint32 seq, quint32 index, const QBy
     return message(magic, {42, seq, 1000, 2000, 1500, index, 30}) + payload;
 }
 static void lowRateRecovery() {
+    constexpr int allFps = (1 << 30) | (1 << 24) | (1 << 20) | (1 << 15);
+    require(captureFps(30, 800000, 800000, true, allFps, 30) == 30, "Healthy 0.8 MB/s stream lost capture FPS");
+    require(captureFps(30, 800000, 600000, true, allFps, 30) == 24, "0.8 -> 0.6 fade kept 30 capture slots");
+    require(captureFps(30, 600000, 600000, true, allFps, 30) == 30, "Manual 0.6 MB/s cap lost capture FPS");
+    require(captureFps(30, 750000, 600000, true, allFps, 30) == 30, "Smaller rate dip changed capture FPS");
+    require(captureFps(30, 800000, 650000, true, allFps, 24) == 30, "Restored budget did not recover 30 FPS");
+    require(captureFps(30, 800000, 500000, true, allFps, 30) == 24, "Severe downgrade kept 30 capture slots");
+    require(captureFps(30, 500000, 500000, true, allFps, 30) == 30, "Manual rate treated as network loss");
+    require(captureFps(30, 800000, 500000, true, allFps ^ (1 << 24), 30) == 20, "Requested unsupported 24 FPS");
+    require(captureFps(20, 800000, 500000, true, allFps, 20) == 20, "Raised user's 20 FPS limit");
     RecoveryCadence recovery;
     qint64 tick = 1000000;
     auto sample = [&](int frames, int fps = 15, int rate = 400000, int duration = 1001000) {

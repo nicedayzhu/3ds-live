@@ -206,8 +206,10 @@ class Viewer final : public QWidget {
                         .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1))
                  << QString("运动补帧 %1   ·   缓冲 %2 ms").arg(motionName, number("playout_delay_ms"))
                  << QString("掌机发送 %1   ·   双屏收齐 %2 FPS").arg(number("device_sent_fps", 1), number("fps_received", 1))
-                 << QString("实际接收 %1   ·   设备上限 %2 MB/s")
-                        .arg(number("bytes_per_s", 2, 1e6), number("device_cap", 2, 1e6))
+                 << QString("设置上限 %1   ·   掌机当前上限 %2 MB/s")
+                        .arg(number("requested_rate", 2, 1e6), number("device_cap", 2, 1e6))
+                 << QString("视频预算 %1   ·   实际接收 %2 MB/s")
+                        .arg(number("device_budget", 2, 1e6), number("bytes_per_s", 2, 1e6))
                  << QString("上 / 下屏 JPEG Q  %1 / %2").arg(number("jpeg_top_q"), number("jpeg_bottom_q"))
                  << QString("%1   ·   %2   ·   %3 ms").arg(quality->text(), snapshot["backend"].toString(), number("processing_ms", 1))
                  << QString("本秒最长源帧间隔  %1 ms").arg(number("source_interval_max_gap_ms", 1));

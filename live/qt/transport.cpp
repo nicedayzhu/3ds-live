@@ -16,6 +16,21 @@ QByteArray message(QByteArray magic, std::initializer_list<quint32> values) {
 static bool newer(quint32 a, quint32 b) {
     return qint32(a - b) > 0;
 }
+int captureFps(int limit, int targetRate, int effectiveRate, bool audio, int supported, int current) {
+    // In the observed 0.8 -> 0.6 MB/s fades, 30 slots left too few JPEG
+    // bytes per pair. Give both panels the 24 FPS slot until the next rate probe.
+    if (effectiveRate == 600000 && targetRate >= 800000)
+        limit = std::min(limit, 24);
+    if (effectiveRate < targetRate && effectiveRate < 600000) {
+        // Fewer capture slots preserve the JPEG budget for each pair. A manually
+        // selected low rate keeps its requested cadence while delivery is healthy.
+        const int reserved = audio ? 100000 : 0;
+        limit = std::min(limit, (effectiveRate - reserved) * 30 / (600000 - reserved));
+    }
+    for (int fps : {30, 24, 20, 15})
+        if (fps <= limit && (supported & (1 << fps))) return fps;
+    return current;
+}
 static constexpr qint64 statusTimeoutUs = 2500000;
 void RecoveryCadence::confirm(int fps, int rate, qint64 now, std::optional<Delivery> delivery) {
     if (fps != confirmedFps || rate != confirmedRate || now - lastStatus > statusTimeoutUs) {
