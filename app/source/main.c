@@ -85,8 +85,9 @@ int main(void)
     start_live();
     puts("\nOpen 3DS-Live.exe on your computer.\n"
          "Use the same LAN on both devices.\n\n"
-         "START   Close this launcher\n"
-         "R+SELECT in game   Start / stop stream");
+         "When ready, press R+SELECT here to stream.\n"
+         "Press R+SELECT again to stop.\n"
+         "START closes this launcher to let you play.");
     while (aptMainLoop()) {
         hidScanInput();
         if (hidKeysDown() & KEY_START) break;
