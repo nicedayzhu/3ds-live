@@ -1,27 +1,31 @@
 #include <3ds.h>
 #include <errno.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include "launcher_ui.h"
 #include "live_launcher.h"
 #include "module_id.h"
 #include "module_install.h"
 
 /* Only inspect the title ID. The streaming hotkey is owned by the module. */
+static bool is_module_process(u32 pid)
+{
+    Handle process;
+    if (!pid || R_FAILED(svcOpenProcess(&process, pid))) return false;
+    s64 title = 0;
+    Result rc = svcGetProcessInfo(&title, process, 0x10001);
+    svcCloseHandle(process);
+    return R_SUCCEEDED(rc) && (u64)title == LIVE_MODULE_ID;
+}
+
 static u32 running_pid(void)
 {
     u32 ids[64];
     s32 count = 0;
     if (R_FAILED(svcGetProcessList(&count, ids, 64))) return 0;
-    for (s32 i = 0; i < count && i < 64; ++i) {
-        Handle process;
-        if (R_FAILED(svcOpenProcess(&process, ids[i]))) continue;
-        s64 title = 0;
-        Result rc = svcGetProcessInfo(&title, process, 0x10001);
-        svcCloseHandle(process);
-        if (R_SUCCEEDED(rc) && (u64)title == LIVE_MODULE_ID) return ids[i];
-    }
+    for (s32 i = 0; i < count && i < 64; ++i)
+        if (is_module_process(ids[i])) return ids[i];
     return 0;
 }
 
@@ -53,35 +57,35 @@ static ResidentModule resident_status(u32 pid)
     return idle ? OLD_IDLE : OLD_BUSY;
 }
 
-static bool start_live(void)
+typedef struct {
+    bool enabled;
+    u32 pid, announced_pid;
+    u64 lookup_at, last_valid;
+} ModuleWatch;
+
+static LauncherPage start_live(ModuleWatch *watch, uint32_t *detail)
 {
     bool new_model = false;
-    if (R_FAILED(APT_CheckNew3DS(&new_model)) || !new_model) {
-        puts("3DS Live needs a New 3DS or New 2DS.");
-        return false;
-    }
-    Result rc = romfsInit();
+    Result rc = APT_CheckNew3DS(&new_model);
     if (R_FAILED(rc)) {
-        printf("Cannot open the launcher RomFS (%08" PRIX32 ").\n", (uint32_t)rc);
-        return false;
+        *detail = (u32)rc;
+        return UI_MODEL_QUERY;
+    }
+    if (!new_model) return UI_OLD_MODEL;
+    rc = romfsInit();
+    if (R_FAILED(rc)) {
+        *detail = (u32)rc;
+        return UI_ROMFS;
     }
     ModuleInstallResult install = module_install("romfs:/3ds-live.cxi", "sdmc:/");
     int install_errno = errno;
     romfsExit();
-    if (install == MODULE_INVALID_BUNDLE) {
-        puts("Cannot read the bundled streaming module.\nCopy or reinstall this launcher.");
-        return false;
-    }
-    if (install == MODULE_TARGET_CONFLICT) {
-        puts("Unexpected file in /luma/sysmodules/.\nCheck the module and its backup on the SD:\n"
-             LIVE_MODULE_SD_PATH);
-        return false;
-    }
+    if (install == MODULE_INVALID_BUNDLE) return UI_BUNDLE;
+    if (install == MODULE_TARGET_CONFLICT) return UI_CONFLICT;
     if (install == MODULE_INSTALL_ERROR) {
-        printf("Cannot install the module on SD.\n%s\n", strerror(install_errno));
-        return false;
+        *detail = (u32)install_errno;
+        return UI_INSTALL;
     }
-    if (install == MODULE_INSTALLED) puts("Streaming module installed on SD.");
     u32 pid = running_pid();
     if (pid) {
         // A status update briefly truncates the file. Allow the writer to finish.
@@ -91,73 +95,118 @@ static bool start_live(void)
             resident = resident_status(pid);
         }
         if (resident == CURRENT_BUILD) {
-            puts("3DS Live is already running.");
-            return true;
+            watch->enabled = true;
+            watch->pid = pid;
+            return UI_WAIT_STATUS;
         }
-        if (resident == OLD_BUSY) {
-            puts("The previous module is still active.\nStop streaming and reopen 3DS Live\nto use the installed update.");
-            return false;
-        }
+        if (resident == OLD_BUSY) return UI_OLD_BUSY;
         if (resident == OLD_IDLE && R_SUCCEEDED(srvPublishToSubscriber(LIVE_EXIT_IF_IDLE, 0))) {
             for (int retry = 0; pid && retry < 20; ++retry) {
                 svcSleepThread(100000000);
-                pid = running_pid();
+                if (!is_module_process(pid)) pid = running_pid();
             }
         }
         if (pid) {
-            puts("To load the installed module, save your\ngame, reboot, then reopen 3DS Live.");
-            return false;
+            // A late status from the current build can still confirm this process.
+            watch->enabled = resident == UNCONFIRMED;
+            watch->pid = pid;
+            return UI_REBOOT;
         }
     }
     /* ns:s is included in Luma's Homebrew Launcher service list. */
     rc = nsInit();
-    bool fresh_status = false;
     if (R_SUCCEEDED(rc)) {
         // On a new boot the OS can reuse a PID recorded on SD before shutdown.
-        fresh_status = unlink(status_path) == 0 || errno == ENOENT;
+        watch->enabled = unlink(status_path) == 0 || errno == ENOENT;
         rc = NS_LaunchTitle(LIVE_MODULE_ID, PMLAUNCHFLAG_LOAD_DEPENDENCIES, &pid);
         nsExit();
     }
     if (R_FAILED(rc)) {
-        printf("Could not start 3DS Live (%08" PRIX32 ").\n"
-               "Enable loading external FIRMs and\nmodules in Luma, then reboot.\n", (uint32_t)rc);
-        return false;
+        watch->enabled = false;
+        *detail = (u32)rc;
+        return UI_LAUNCH;
     }
-    for (int retry = 0; fresh_status && retry < 30; ++retry) {
-        svcSleepThread(100000000);
-        u32 actual = running_pid();
-        if (actual && (!pid || pid == actual) && resident_status(actual) == CURRENT_BUILD) {
-            puts("3DS Live is ready.");
-            return true;
-        }
+    watch->pid = pid;
+    return UI_WAIT_STATUS;
+}
+
+static void update_module_view(ModuleWatch *watch, LauncherView *view, u64 now)
+{
+    if (watch->pid && !is_module_process(watch->pid)) {
+        watch->pid = watch->announced_pid = 0;
+        watch->last_valid = 0;
     }
-    puts("Launch requested. Read the status file\nin /3ds/3ds-live/ if streaming fails.");
-    return false;
+    if (!watch->pid && now >= watch->lookup_at) {
+        watch->pid = running_pid();
+        watch->lookup_at = now + 2ull * SYSCLOCK_ARM11;
+    }
+    if (launcher_read_status(status_path, watch->pid, LIVE_MODULE_BUILD_ID, &view->module)) {
+        watch->last_valid = now;
+        view->page = UI_LIVE;
+        if (watch->announced_pid != watch->pid &&
+            R_SUCCEEDED(srvPublishToSubscriber(LIVE_LAUNCHER_OPENED, 0)))
+            watch->announced_pid = watch->pid;
+    } else if (view->page == UI_LIVE &&
+               (!watch->last_valid || now - watch->last_valid >= SYSCLOCK_ARM11)) {
+        // A concurrent write can produce a short file for one poll. If reports
+        // stay unreadable, stop displaying the previous live state.
+        view->page = UI_WAIT_STATUS;
+    }
+}
+
+static bool resumed;
+
+static void on_applet_event(APT_HookType event, void *unused)
+{
+    (void)unused;
+    if (event == APTHOOK_ONRESTORE || event == APTHOOK_ONWAKEUP)
+        __atomic_store_n(&resumed, true, __ATOMIC_RELEASE);
+}
+
+static bool same_view(const LauncherView *a, const LauncherView *b)
+{
+    return a->page == b->page && a->detail == b->detail &&
+           a->module.state == b->module.state && a->module.result == b->module.result &&
+           a->module.led_result == b->module.led_result && a->device.wifi == b->device.wifi &&
+           a->device.strength == b->device.strength && a->device.battery == b->device.battery &&
+           a->device.charging == b->device.charging;
 }
 
 int main(void)
 {
     gfxInitDefault();
-    consoleInit(GFX_TOP, NULL);
-    printf("\x1b[1;1H3DS Live\n\n");
-    bool ready = start_live();
-    if (ready) {
-        srvPublishToSubscriber(LIVE_LAUNCHER_OPENED, 0);
-        puts("\nOpen 3DS-Live.exe on your computer.\n"
-             "Use the same LAN on both devices.\n\n"
-             "When ready, press R+SELECT here to stream.\n"
-             "Press R+SELECT again to stop.\n"
-             "\nNotification LED\n"
-             "Blue: ready      Amber pulse: waiting\n"
-             "Green: PC receiving video   Off: stopped");
-    }
-    puts("\nSTART closes this launcher.");
+    LauncherView view = { .page = UI_STARTING, .device = { -1, -1, -1, -1 } };
+    launcher_ui_draw(&view);
+    gspWaitForVBlank();
+    aptHookCookie hook;
+    aptHook(&hook, on_applet_event, NULL);
+    ModuleWatch watch = {0};
+    LauncherView previous = view;
+    view.page = start_live(&watch, &view.detail);
+    launcher_device_init();
+    u64 next_module = 0, next_device = 0;
     while (aptMainLoop()) {
         hidScanInput();
         if (hidKeysDown() & KEY_START) break;
+        const u64 now = svcGetSystemTick();
+        const bool restore = __atomic_exchange_n(&resumed, false, __ATOMIC_ACQ_REL);
+        if (watch.enabled && (restore || now >= next_module)) {
+            update_module_view(&watch, &view, now);
+            next_module = now + SYSCLOCK_ARM11 / 2;
+        }
+        if (restore || now >= next_device) {
+            view.device = launcher_device_read();
+            next_device = now + 2ull * SYSCLOCK_ARM11;
+        }
+        if (restore || !same_view(&view, &previous)) {
+            launcher_ui_draw(&view);
+            previous = view;
+        }
         gspWaitForVBlank();
     }
-    if (ready) srvPublishToSubscriber(LIVE_LAUNCHER_CLOSED, 0);
+    if (is_module_process(watch.announced_pid)) srvPublishToSubscriber(LIVE_LAUNCHER_CLOSED, 0);
+    aptUnhook(&hook);
+    launcher_device_exit();
     gfxExit();
     return 0;
 }

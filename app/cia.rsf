@@ -42,10 +42,12 @@ AccessControlInfo:
     - DirectSdmcWrite
   ServiceAccessControl:
     - APT:U
+    - ac:u
     - fs:USER
     - gsp::Gpu
     - hid:USER
     - ns:s
+    - ptm:u
 
   # libctru start-up, UI and filesystem, plus the launcher's read-only PID lookup.
   SystemCallAccess:

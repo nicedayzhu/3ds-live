@@ -9,7 +9,7 @@ APP_AUTHOR := 3DS Live
 APP_ICON := assets/icon.png
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11 $(ARCH) -mword-relocations -D__3DS__ -I$(CTRULIB)/include -I../codec/include -I../sysmod/build/3dslive
-OBJECTS := $(patsubst source/%.c,build/%.o,$(wildcard source/*.c))
+OBJECTS := $(patsubst source/%.c,build/%.o,$(wildcard source/*.c)) build/launcher_font.o
 MODULE := ../sysmod/3dslive.cxi
 MODULE_ID := ../sysmod/build/3dslive/module_id.h
 EMBEDDED := build/romfs/3ds-live.cxi
@@ -29,6 +29,10 @@ $(EMBEDDED): $(MODULE)
 	cp $< $@
 
 build/main.o: $(MODULE_ID)
+build/launcher_font.o: source/launcher_font.S assets/launcher-font.bin assets/NotoSansSC-OFL.txt
+	@mkdir -p build
+	$(CC) $(ARCH) -c $< -o $@
+
 build/%.o: source/%.c Makefile
 	@mkdir -p build
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

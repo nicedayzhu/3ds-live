@@ -12,6 +12,7 @@ $files = [ordered]@{
     '使用指南.md' = "$repo/INSTALL.md"
     'LICENSE' = "$repo/LICENSE"
     'licenses/JPEGENC-LICENSE' = "$repo/third_party/JPEGENC/LICENSE"
+    'licenses/NotoSansSC-OFL.txt' = "$repo/app/assets/NotoSansSC-OFL.txt"
 }
 foreach ($entry in $files.GetEnumerator()) {
     $target = Join-Path $dist $entry.Key
