@@ -29,13 +29,19 @@ $(EMBEDDED): $(MODULE)
 	cp $< $@
 
 build/main.o: $(MODULE_ID)
+build/launcher_ui.o: CPPFLAGS += -Ibuild
+build/launcher_ui.o: build/launcher_logo.h
+build/launcher_logo.h: $(APP_ICON) make_launcher_logo.py
+	@mkdir -p $(@D)
+	$(PYTHON) make_launcher_logo.py $< $@
+
 build/launcher_font.o: source/launcher_font.S assets/launcher-font.bin assets/NotoSansSC-OFL.txt
 	@mkdir -p build
 	$(CC) $(ARCH) -c $< -o $@
 
 build/%.o: source/%.c Makefile
 	@mkdir -p build
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 3ds-live.elf: $(OBJECTS)
 	$(CC) $(ARCH) -specs=3dsx.specs $^ -L$(CTRULIB)/lib -lctru -lm -o $@

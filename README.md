@@ -6,7 +6,7 @@
 
 ## 构建
 
-**掌机**使用 devkitARM、libctru、3dsxtool、smdhtool、bannertool、makerom、GNU Make 和 Python 3。在已设置 `DEVKITPRO`、`DEVKITARM` 和 `PATH` 的 devkitPro shell 中运行 `make handheld`。Windows 也可以从 PowerShell 运行以下命令。
+**掌机**使用 devkitARM、libctru、3dsxtool、smdhtool、bannertool、makerom、GNU Make 和带 Pillow 的 Python 3。构建时会从 HOME 菜单图标 `app/assets/icon.png` 生成启动器左上角的 Logo。在已设置 `DEVKITPRO`、`DEVKITARM` 和 `PATH` 的 devkitPro shell 中运行 `make handheld`。Windows 也可以从 PowerShell 运行以下命令。
 
 ```powershell
 .\scripts\build-handheld.ps1 -Sdk D:\devkitPro -Bash D:\devkitPro\msys2\usr\bin\bash.exe

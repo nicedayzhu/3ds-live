@@ -1,8 +1,10 @@
 #include "launcher_ui.h"
 #include "launcher_text.h"
+#include "launcher_logo.h"
 #include <3ds.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 /* libctru presents BGR8 framebuffers as portrait columns, bottom pixel first. */
 typedef struct { u8 *pixels; int width; } Screen;
@@ -145,11 +147,13 @@ static void top_screen(Screen s, const LauncherView *v, const LauncherText *text
 {
     const LauncherStateText *state = v->page == UI_LIVE ? &text->live[v->module.state] : &text->startup[v->page];
     const u32 accent = state_accent(v);
-    rect(s, 0, 0, s.width, 240, 0x14282A);
-    // Two LCDs form the small product mark.
-    outline(s, 22, 17, 21, 12, GREEN);
-    outline(s, 24, 31, 17, 9, GREEN);
-    label(s, 53, 35, HEADING, 0xF2F6EF, "3DS Live");
+    rect(s, 0, 0, s.width, 240, LAUNCHER_HEADER_COLOR);
+    const int logo_x = 21, logo_y = 11;
+    for (int column = 0; column < LAUNCHER_LOGO_SIZE; ++column) {
+        u8 *dest = s.pixels + 3 * ((logo_x + column) * 240 + 240 - logo_y - LAUNCHER_LOGO_SIZE);
+        memcpy(dest, launcher_logo[column], sizeof launcher_logo[column]);
+    }
+    label(s, logo_x + LAUNCHER_LOGO_SIZE + 9, 35, HEADING, 0xF2F6EF, "3DS Live");
     battery(s, &v->device, text);
     rect(s, 22, 52, 356, 1, 0x38504F);
     dot(s, 26, 75, 4, accent);
