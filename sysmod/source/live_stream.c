@@ -7,6 +7,7 @@
 #include "live_pair.h"
 #include "live_audio_transport.h"
 #include "live_discovery.h"
+#include "live_receiver_feedback.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -36,6 +37,8 @@ static int fd=-1,lastErrno;
 #define SOC_ARENA_BYTES 0x100000u
 static struct sockaddr_in target;
 static LiveDiscovery discovery;
+static LiveReceiverFeedback receiverFeedback;
+static bool receiverVideo;
 static bool automaticHost,mediaReady;
 static u64 lastProbeTick;
 static u32 localAddress,localMask;
@@ -97,6 +100,7 @@ bool live_requested(void) {
 }
 u32 live_fps(void){return __atomic_load_n(&fps,__ATOMIC_RELAXED);}
 bool live_peer_ready(void){return !stopped()&&__atomic_load_n(&mediaReady,__ATOMIC_ACQUIRE);}
+bool live_receiver_has_video(void){return !stopped()&&__atomic_load_n(&receiverVideo,__ATOMIC_ACQUIRE);}
 u32 live_encoded_frames(unsigned sc){return sc<2?__atomic_load_n(&jpegFrames[sc],__ATOMIC_RELAXED):0;}
 bool live_audio_active(void){return audioEnabled&&worker&&!stopped();}
 bool live_audio_submit(const s16 *pcm,u32 pts) {
@@ -360,6 +364,11 @@ static bool send_discovery_probe(const u8 *probe,u32 address) {
     return true;
 }
 
+static void reset_receiver_feedback(void) {
+    receiverFeedback=(LiveReceiverFeedback){0};
+    __atomic_store_n(&receiverVideo,false,__ATOMIC_RELEASE);
+}
+
 static void poll_discovery(u64 now) {
     bool expired=live_discover_expire(&discovery,now,SYSCLOCK_ARM11);
     if(!expired&&lastProbeTick&&now-lastProbeTick<SYSCLOCK_ARM11)return;
@@ -377,6 +386,7 @@ static void poll_discovery(u64 now) {
     bool moved=address&&localAddress&&(address!=localAddress||(netmask&&localMask&&netmask!=localMask));
     if(expired||moved) {
         __atomic_store_n(&mediaReady,false,__ATOMIC_RELEASE);
+        reset_receiver_feedback();
         discovery.peer=0;
         discovery.outstanding=false;
         if(automaticHost)target.sin_addr.s_addr=0;
@@ -395,6 +405,7 @@ static void poll_discovery(u64 now) {
     if(fd<0)return;
     if(!automaticHost) {
         bool usable=live_peer_address(ntohl(target.sin_addr.s_addr),localAddress,localMask);
+        if(!usable&&mediaReady)reset_receiver_feedback();
         __atomic_store_n(&mediaReady,usable,__ATOMIC_RELEASE);
         return;
     }
@@ -461,7 +472,11 @@ static void control(u64 *due) {
                 continue;
             }
             if(!mediaReady||from.sin_addr.s_addr!=target.sin_addr.s_addr)continue;
-            if(n==28&&!memcmp(msg,"R3FB",4))feedbackCount++;
+            if(n==28&&!memcmp(msg,"R3FB",4)) {
+                feedbackCount++;
+                live_receiver_observe(&receiverFeedback,get32(msg+8),get32(msg+16),now,
+                                      (u64)LIVE_PEER_LEASE_SECONDS*SYSCLOCK_ARM11);
+            }
             if((n==20&&!memcmp(msg,"R6CF",4))||(n==24&&!memcmp(msg,"R10C",4))) {
                 u32 seq=get32(msg+8),hz=get32(msg+12),bps=get32(msg+16);
                 bool nextCombined=n==24?get32(msg+20)!=0:combinedFec;
@@ -474,6 +489,9 @@ static void control(u64 *due) {
                 LightLock_Unlock(&lock);lastStatusTick=0;
             }
         }
+        const bool hasVideo=live_receiver_recent(&receiverFeedback,now,(u64)LIVE_PEER_LEASE_SECONDS*SYSCLOCK_ARM11);
+        if(hasVideo!=__atomic_load_n(&receiverVideo,__ATOMIC_RELAXED))
+            __atomic_store_n(&receiverVideo,hasVideo,__ATOMIC_RELEASE);
     }
     if(!mediaReady||now-lastStatusTick<SYSCLOCK_ARM11)return;
     u8 msg[108];const u32 msgBytes=audioEnabled?108:76;memcpy(msg,audioEnabled?"R9ST":"R7ST",4);
@@ -591,6 +609,7 @@ Result live_start(void *(*allocate)(u32 bytes)) {
     session=(u32)started;if(!session)session=1;
     lastStatusTick=lastControlTick=started;
     discovery=(LiveDiscovery){.challenge=(u32)(started>>16)};
+    reset_receiver_feedback();
     lastProbeTick=0;
     localAddress=localMask=0;
     memset(&netDiag,0,sizeof netDiag);

@@ -14,7 +14,7 @@ CPPFLAGS += -DLIVE_FRAME_TIMING
 endif
 CFLAGS := $(ARCH) -g -O2 -Wall -Wextra -std=gnu11 -mword-relocations -fno-strict-aliasing -ffunction-sections -fdata-sections
 LDFLAGS := $(ARCH) -specs=3dsx.specs -Wl,--gc-sections -Wl,-Map,$(BUILD)/module.map
-SOURCES := main capture live_stream live_timing live_jpeg live_jpeg_source live_audio live_codec convert
+SOURCES := main status_led capture live_stream live_timing live_jpeg live_jpeg_source live_audio live_codec convert
 OBJECTS := $(addprefix $(BUILD)/,$(addsuffix .o,$(SOURCES)))
 vpath %.c source ../codec/source
 

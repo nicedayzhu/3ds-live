@@ -19,7 +19,7 @@
 .\scripts\package.ps1
 ```
 
-本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。掌机 SD 卡所需文件在 `dist/SD`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。
+本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。掌机 SD 卡所需文件在 `dist/SD`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。完整包的发布版本取自项目根目录的 `VERSION`，播放器版本取自 `live/qt/CMakeLists.txt`。
 
 本机工作副本在 `.git/info/3ds-live-desktop-output` 保留一个空目录，供 PowerShell 在清理 `dist` 后恢复发布目录的 NTFS 完整性标签。新建的 `dist/Windows` 仍从当前父目录继承访问权限。其他工作副本按默认方式创建输出目录。
 

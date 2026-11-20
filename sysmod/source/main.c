@@ -3,8 +3,10 @@
 #include <sys/stat.h>
 #include "buffers.h"
 #include "capture.h"
+#include "live_launcher.h"
 #include "live_stream.h"
 #include "live_timing.h"
+#include "status_led.h"
 
 // This is a system title with no APT foreground session. Initialize only its own heap, SRV and SD.
 extern char *fake_heap_start, *fake_heap_end;
@@ -17,6 +19,7 @@ void __libc_fini_array(void);
 
 static const u32 heapBytes = 384 * 1024;
 static bool fsReady, sdReady, clockService;
+static Result ptmResult;
 
 void __system_allocateHeaps(void)
 {
@@ -40,7 +43,8 @@ void __appInit(void)
     srvSetBlockingPolicy(true);
     fsReady = R_SUCCEEDED(fsInit());
     sdReady = fsReady && R_SUCCEEDED(archiveMountSdmc());
-    clockService = R_SUCCEEDED(ptmSysmInit());
+    ptmResult = ptmSysmInit();
+    clockService = R_SUCCEEDED(ptmResult);
 }
 
 void initSystem(void (*returnAddress)(void))
@@ -111,14 +115,49 @@ static void release_arenas(void)
     }
 }
 
-static void report(const char *state, Result result)
+typedef enum { MODULE_IDLE, MODULE_SEARCHING, MODULE_PAIRED, MODULE_ERROR, MODULE_SLEEP, MODULE_STOPPED } ModuleState;
+
+static void update_status(ModuleState state, Result result, LedState light)
 {
+    static const char *const names[] = {"idle", "searching", "streaming", "error", "sleep", "stopped"};
+    static const char *const lights[] = {
+        [LED_STATE_OFF] = "off", [LED_STATE_READY] = "ready", [LED_STATE_WAITING] = "waiting",
+        [LED_STATE_STREAMING] = "receiving", [LED_STATE_ERROR] = "error"
+    };
+    static int lastLight = -1, lastState = -1;
+    static unsigned failures, polls;
+    static u64 nextWrite;
+    static Result ledResult, lastResult;
+    const bool changed = (int)light != lastLight;
+    const bool statusChanged = changed || (int)state != lastState || result != lastResult;
+    const bool persistent = light == LED_STATE_READY || light == LED_STATE_WAITING || light == LED_STATE_STREAMING;
+    if (!statusChanged) {
+        if (!clockService || failures >= 3 || (!persistent && !failures)) return;
+        if (++polls < 64) return;
+    }
+    polls = 0;
+    const u64 now = svcGetSystemTick();
+    if (changed) failures = 0;
+    const Result previousLedResult = ledResult;
+    // System notifications share this lamp. Restore a persistent pattern after
+    // they have had time to display, without writing IPC or SD on every frame.
+    if (changed || (clockService && failures < 3 && (persistent || failures) && now >= nextWrite)) {
+        ledResult = clockService ? status_led_apply(light) : ptmResult;
+        failures = R_FAILED(ledResult) ? failures + 1 : 0;
+        nextWrite = now + (failures ? 1ull : 16ull) * SYSCLOCK_ARM11;
+        lastLight = (int)light;
+    }
+    if (!statusChanged && ledResult == previousLedResult) return;
+    lastState = (int)state;
+    lastResult = result;
     if (!sdReady) return;
     FILE *file = fopen("sdmc:/3ds/3ds-live/status.txt", "w");
     if (file) {
         u32 pid = 0;
         svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
-        fprintf(file, "pid=%lu\nstate=%s\nresult=%08lx\n", (unsigned long)pid, state, (unsigned long)(u32)result);
+        fprintf(file, "pid=%lu\nstate=%s\nresult=%08lx\nled=%s\nled_result=%08lx\n",
+                (unsigned long)pid, names[state], (unsigned long)(u32)result,
+                lights[light], (unsigned long)(u32)ledResult);
         fclose(file);
     }
 }
@@ -185,7 +224,6 @@ int main(void)
         mkdir("sdmc:/3ds", 0777);
         mkdir("sdmc:/3ds/3ds-live", 0777);
     }
-    report("idle", 0);
     Handle notification = 0;
     if (R_SUCCEEDED(srvEnableNotification(&notification))) {
         srvSubscribe(0x100); // PM requests termination.
@@ -193,7 +231,12 @@ int main(void)
         srvSubscribe(0x10C); // NS may choose a different CPU mode for a newly started application.
         srvSubscribe(0x213); // Lid opened.
         srvSubscribe(0x214); // Lid closed.
+        srvSubscribe(LIVE_LAUNCHER_OPENED);
+        srvSubscribe(LIVE_LAUNCHER_CLOSED);
     }
+    LedState idleLight = LED_STATE_READY;
+    Result startResult = 0;
+    update_status(MODULE_IDLE, 0, idleLight);
     const u32 toggleKeys = KEY_R | KEY_SELECT;
     bool running = false, held = false, awake = true, resume = false, quit = false, previousPeer = false;
     while (!quit) {
@@ -201,6 +244,10 @@ int main(void)
             u32 note;
             if (R_FAILED(srvReceiveNotification(&note))) break;
             if (note == 0x100 || note == PTMNOTIFID_SHUTDOWN) { quit = true; break; }
+            if (note == LIVE_LAUNCHER_OPENED || note == LIVE_LAUNCHER_CLOSED) {
+                idleLight = note == LIVE_LAUNCHER_OPENED ? LED_STATE_READY : LED_STATE_OFF;
+                if (note == LIVE_LAUNCHER_OPENED && !running) startResult = 0;
+            }
             if (note == 0x10C) {
                 if (running) capture_reset();
                 clockBefore = -1;
@@ -213,7 +260,6 @@ int main(void)
                     stop_stream();
                     running = false;
                     resume = true;
-                    report("sleep", 0);
                 }
             }
             if (note == 0x213) awake = true;
@@ -226,12 +272,13 @@ int main(void)
                 if (running) {
                     stop_stream();
                     running = false;
-                    report("idle", 0);
+                    startResult = 0;
+                    idleLight = LED_STATE_OFF;
                 } else {
-                    Result rc = start_stream();
-                    running = R_SUCCEEDED(rc);
+                    startResult = start_stream();
+                    running = R_SUCCEEDED(startResult);
                     previousPeer = false;
-                    report(running ? "searching" : "error", rc);
+                    if (!running) idleLight = LED_STATE_ERROR;
                 }
             }
             held = pressed;
@@ -239,17 +286,22 @@ int main(void)
                 const bool peer = live_peer_ready();
                 if (peer != previousPeer) {
                     if (!peer) capture_reset();
-                    report(peer ? "streaming" : "searching", 0);
                     previousPeer = peer;
                 }
                 set_boost(peer);
                 if (peer) capture_poll();
             }
         }
+        ModuleState state = MODULE_IDLE;
+        if (!awake) state = MODULE_SLEEP;
+        else if (running) state = previousPeer ? MODULE_PAIRED : MODULE_SEARCHING;
+        else if (R_FAILED(startResult)) state = MODULE_ERROR;
+        const LedState light = status_led_state(awake, running, running && previousPeer && live_receiver_has_video(), idleLight);
+        update_status(state, startResult, light);
         svcSleepThread(running && previousPeer ? 2000000 : 12000000);
     }
     if (running) stop_stream();
     if (notification) svcCloseHandle(notification);
-    report("stopped", 0);
+    update_status(MODULE_STOPPED, 0, LED_STATE_OFF);
     return 0;
 }

@@ -6,7 +6,7 @@ APP_DESCRIPTION := Wireless dual-screen streaming for New Nintendo 3DS
 APP_AUTHOR := 3DS Live
 APP_ICON := assets/icon.png
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11 $(ARCH) -D__3DS__ -I$(CTRULIB)/include
+CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11 $(ARCH) -D__3DS__ -I$(CTRULIB)/include -I../codec/include
 
 .PHONY: all
 all: 3ds-live.3dsx

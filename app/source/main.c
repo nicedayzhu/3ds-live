@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include "live_launcher.h"
 
 #define LIVE_MODULE_ID UINT64_C(0x0004013000F1D402)
 #define LIVE_MODULE_FILE "sdmc:/luma/sysmodules/0004013000F1D402.cxi"
@@ -83,16 +84,21 @@ int main(void)
     consoleInit(GFX_TOP, NULL);
     printf("\x1b[1;1H3DS Live\n\n");
     start_live();
+    srvPublishToSubscriber(LIVE_LAUNCHER_OPENED, 0);
     puts("\nOpen 3DS-Live.exe on your computer.\n"
          "Use the same LAN on both devices.\n\n"
          "When ready, press R+SELECT here to stream.\n"
          "Press R+SELECT again to stop.\n"
-         "START closes this launcher to let you play.");
+         "START closes this launcher to let you play.\n\n"
+         "Notification LED\n"
+         "Blue: ready      Amber pulse: waiting\n"
+         "Green: PC receiving video   Off: stopped");
     while (aptMainLoop()) {
         hidScanInput();
         if (hidKeysDown() & KEY_START) break;
         gspWaitForVBlank();
     }
+    srvPublishToSubscriber(LIVE_LAUNCHER_CLOSED, 0);
     gfxExit();
     return 0;
 }

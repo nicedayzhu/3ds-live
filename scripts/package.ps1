@@ -4,8 +4,9 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $repo 'dist'
 $windows = Join-Path $dist 'Windows'
-$version = [regex]::Match((Get-Content -Raw "$repo/live/qt/CMakeLists.txt"), 'project\(three_ds_live_qt VERSION ([\d.]+)').Groups[1].Value
-if (!$version) { throw 'Could not read the 3DS Live version.' }
+# Handheld releases can ship with the existing Windows player.
+$version = (Get-Content -LiteralPath "$repo/VERSION" -Raw).Trim()
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid 3DS Live bundle VERSION.' }
 $archive = Join-Path $dist "3DS-Live-$version-Windows-x64-New3DS.zip"
 $files = [ordered]@{
     '使用指南.md' = "$repo/INSTALL.md"
