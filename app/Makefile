@@ -4,8 +4,8 @@
 include $(DEVKITARM)/3ds_rules
 
 APP_TITLE := 3DS Live
-APP_DESCRIPTION := Wireless dual-screen streaming for New Nintendo 3DS
-APP_AUTHOR := 3DS Live
+APP_DESCRIPTION := Wireless dual-screen streaming for New Nintendo 3DS (v$(strip $(file <../VERSION)))
+APP_AUTHOR := nicedayzhu
 APP_ICON := assets/icon.png
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11 $(ARCH) -mword-relocations -D__3DS__ -I$(CTRULIB)/include -I../codec/include -I../sysmod/build/3dslive
@@ -46,7 +46,7 @@ build/%.o: source/%.c Makefile
 3ds-live.elf: $(OBJECTS)
 	$(CC) $(ARCH) -specs=3dsx.specs $^ -L$(CTRULIB)/lib -lctru -lm -o $@
 
-3ds-live.smdh: $(APP_ICON) Makefile
+3ds-live.smdh: $(APP_ICON) Makefile ../VERSION
 	smdhtool --create "$(APP_TITLE)" "$(APP_DESCRIPTION)" "$(APP_AUTHOR)" $< $@
 
 3ds-live.3dsx: 3ds-live.elf 3ds-live.smdh $(EMBEDDED)
@@ -57,7 +57,7 @@ build/banner.bnr: assets/banner.png assets/banner.wav
 	bannertool makebanner -i $< -a assets/banner.wav -o $@
 
 build/3ds-live.cia: 3ds-live.elf 3ds-live.smdh build/banner.bnr cia.rsf $(EMBEDDED) cia_version.py ../VERSION
-	makerom -f cia -o $@ -rsf cia.rsf -elf $< -icon 3ds-live.smdh -banner build/banner.bnr -exefslogo -ver "$$(awk -F. '{print $$1 * 1024 + $$2 * 16 + $$3}' ../VERSION)"
+	makerom -f cia -o $@ -rsf cia.rsf -elf $< -icon 3ds-live.smdh -banner build/banner.bnr -exefslogo -ver "$$($(PYTHON) cia_version.py --print ../VERSION)"
 	$(PYTHON) cia_version.py $@ ../VERSION
 
 -include $(OBJECTS:.o=.d)

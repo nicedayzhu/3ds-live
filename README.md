@@ -1,44 +1,46 @@
-# 3DS Live
+<p align="center">
+  <img src="live/qt/assets/3ds-live.png" width="104" height="104" alt="3DS Live 应用图标">
+</p>
 
-在 Windows 上用 Qt 观看 New Nintendo 3DS 系列掌机的上下屏和立体声。掌机开始推流后通过局域网寻找播放器，双方交换发现报文，再通过单播传输音视频。播放器可以先于或晚于掌机启动。安装、旧版迁移和自动重连见[使用指南](INSTALL.md)。
+<h1 align="center">3DS Live</h1>
 
-画质菜单提供 JPEG 去块和 2× 超分。各档位在真机推流录像中的文字表现、双屏耗时和及时完成的增强帧数见[双屏超分实测](live/docs/SUPER-RESOLUTION.md)。
+<p align="center">把 New Nintendo 3DS 的上下屏和游戏立体声，无线投到 Windows 电脑上。</p>
+<p align="center"><img src="docs/images/platforms.svg" width="392" alt="支持 New 3DS 系列掌机和 Windows x64，项目采用 MIT 许可"></p>
+<p align="center"><a href="INSTALL.md">安装与首次投屏</a> · <a href="live/qt/README.md">播放器操作</a></p>
 
-## 构建
+<p align="center">
+  <a href="docs/images/home-homebrew.png"><img src="docs/images/home-homebrew.png" width="248" alt="Windows 播放器显示真机 HOME 菜单，选中 Homebrew Launcher"></a>
+  <a href="docs/images/home-mario-maker.png"><img src="docs/images/home-mario-maker.png" width="248" alt="同一台掌机选中《Super Mario Maker for Nintendo 3DS》，下屏显示软件列表"></a>
+  <a href="docs/images/home-mario-kart.png"><img src="docs/images/home-mario-kart.png" width="248" alt="同一台掌机选中《马力欧卡丁车 7》，上屏显示游戏标题和赛车"></a>
+</p>
 
-**掌机**使用 devkitARM、libctru、3dsxtool、smdhtool、bannertool、makerom、GNU Make 和带 Pillow 的 Python 3。构建时会从 HOME 菜单图标 `app/assets/icon.png` 生成启动器左上角的 Logo。在已设置 `DEVKITPRO`、`DEVKITARM` 和 `PATH` 的 devkitPro shell 中运行 `make handheld`。Windows 也可以从 PowerShell 运行以下命令。
+在掌机 HOME 菜单中选中 Homebrew Launcher、《超级马力欧创作家》或《马力欧卡丁车 7》时，上屏会显示对应软件。这三张图直接截自接收真机推流的 Windows 播放器，点击可查看原图。
 
-```powershell
-.\scripts\build-handheld.ps1 -Sdk D:\devkitPro -Bash D:\devkitPro\msys2\usr\bin\bash.exe
-```
+## 第一次投屏
 
-掌机端产物为 `dist/3ds-live.3dsx` 和 `dist/3ds-live.cia`。两者都在 RomFS 中携带本次构建的系统模块。用户任选一个，首次启动时会安装模块，升级时会检查并更新模块。使用本机的 C 编译器运行 `make test` 可检查协议、编解码和发现租约。
+需要已启用 Luma3DS 外部系统模块的 **New 3DS、New 3DS XL 或 New 2DS XL**，以及一台 **Windows x64** 电脑。掌机连 Wi-Fi，电脑可以用网线或 Wi-Fi 接入同一路由器。
 
-**Windows**使用 PowerShell 7、Visual Studio C++ x64、CMake、Qt 6 MSVC x64 和 7-Zip。标准包使用 DirectML。构建脚本下载并校验固定版本的依赖，校验模型，生成播放器并运行 Qt 测试。模型可取自本项目二进制包中的 `Windows/runtime/models`。在已有本地构建缓存时可省略 `-Models`。[Qt 播放器说明](live/qt/README.md)
+1. **电脑上打开播放器。** 完整解压发布包，双击 `Windows/3DS-Live.exe`。
+2. **掌机上打开 3DS Live。** 使用 Homebrew Launcher 时复制包内 `SD/3ds/` 下的程序；想从 HOME 菜单打开则安装 `3ds-live.cia`。两种方式都已内置直播模块。
+3. **在「准备就绪」画面按 R + SELECT。** 两端会自动发现对方。看到「正在投屏」后，按 **START** 退出启动器即可进入游戏。再按一次 **R + SELECT** 停止投屏。
 
-```powershell
-.\live\qt\build.ps1 -QtSdk C:\Qt\6.10.3\msvc2022_64 -Models D:\Models\3ds-live
-.\scripts\package.ps1
-```
+首次设置 Luma3DS、从旧测试版迁移、查看通知灯或排查连接，都可以按步骤操作。[图文使用指南](INSTALL.md)
 
-本机使用时，直接双击项目内的 `dist/Windows/3DS-Live.exe`。打包命令将使用指南、许可证、完整 ZIP 和对应的 SHA-256 校验文件写入同一项目的 `dist`，并逐项回读校验 ZIP。完整 ZIP 包含 Windows 绿色版、可直接安装的 CIA，以及按 SD 卡路径放置的 3DSX 和可选配置模板。完整包的发布版本取自项目根目录的 `VERSION`，播放器版本取自 `live/qt/CMakeLists.txt`。
+## 看双屏、调画质、保存片段
 
-本机工作副本在 `.git/info/3ds-live-desktop-output` 保留一个空目录，供 PowerShell 在清理 `dist` 后恢复发布目录的 NTFS 完整性标签。新建的 `dist/Windows` 仍从当前父目录继承访问权限。其他工作副本按默认方式创建输出目录。
+<p align="center">
+  <a href="docs/images/mk7-race.png"><img src="docs/images/mk7-race.png" width="320" alt="《马力欧卡丁车 7》真机比赛画面，上屏显示海滨赛道，下屏显示排名和地图"></a>
+  <a href="docs/images/windows-player.png"><img src="docs/images/windows-player.png" width="320" alt="Windows 播放器回放《马力欧卡丁车 7》的另一段比赛，底栏可见播放状态"></a>
+</p>
 
-编译可选的 NVIDIA 后端时，将 `CUDA_PATH` 指向 CUDA SDK，`TensorRT_ROOT` 指向 TensorRT SDK，再向 Qt 构建脚本传 `-TensorRT`。如需一并部署本机配套引擎和运行库，传 `-AccelerationDirectory <加速目录>`。通用 ZIP 携带 DirectML 模型，本机兼容的 TensorRT 文件可放在 `Windows/runtime/acceleration/`。
+《马力欧卡丁车 7》比赛中，上屏看赛道，下屏看排名、道具和对手位置。左图是掌机传出的原尺寸双屏，右图是另一段真机比赛在播放器中的回放。
 
-## 源码
+- **双屏与声音。** 可以同时看上屏动作和下屏地图，在电脑上听游戏立体声。掌机或电脑更换局域网 IP 后会重新连接。
+- **画质与流畅度。** 工具栏可以调目标帧率和带宽。画质菜单提供 JPEG 去块和 2× 超分，可按显卡性能选择；需要补帧时可选光流或 RIFE。[播放器操作说明](live/qt/README.md)
+- **录制与直播。** 按 **Ctrl+R** 可在电脑上保存 MP4。要将画面接入 OBS，可以通过现有 RTSP 服务输出。
 
-Git 提交标题使用英文 `type(scope): summary`。例如 `fix(pc): restore video when an AI model fails`。范围用 `3ds`（掌机）、`pc`（播放器）或 `3ds-pc`（双端）。文档和构建改动分别用 `docs` 和 `build`。
+## 致谢与许可 · Credits
 
-| 目录 | 职责 |
-| --- | --- |
-| `app/` | 安装和启动内置的 Live 系统模块，显示就绪或重启提示 |
-| `sysmod/` | 游戏中热键、双屏与 DSP 混音采集、UDP 发现和发送 |
-| `codec/` | 直播编解码、分片、纠错、码率及发现报文 |
-| `live/qt/` | Qt/C++ 接收、播放、画质增强、诊断、RTSP 和 PC 端 MP4 输出 |
-| `live/tests/native/` | 主机可执行的 C 测试 |
+感谢 **BolgarMaxym97** 开发 **3ds-recorder**。3DS Live 的掌机端沿用了上游的后台系统模块、双屏 DMA 采集和 DSP 立体声采集。**nicedayzhu** 在此基础上开发了双屏 Live 分支，并将其整理为本独立项目。[3ds-recorder 上游](https://github.com/BolgarMaxym97/3ds-recorder) · [Live 分支](https://github.com/nicedayzhu/3ds-recorder/tree/feature/dual-screen-live)
 
-双方等待连接时每秒探测一次，PC 向掌机的 UDP 8002 发送邀请，掌机向 PC 的媒体端口（默认 UDP 8001）发送发现请求。连续约四秒未确认就重新寻找播放器。音视频发往选中的单个 PC。[协议说明](live/docs/PROTOCOL.md)
-
-本项目从 `3ds-recorder` 的 Live 分支提交 `927f4ece60f3bae64d6a35d32104e78f50a07308` 提取。JPEG 编码器使用随源附带的 JPEGENC 修订 `f51421bdaba8e098dc82130a17adaae6d61c3377`。原作者许可和 PC 运行库声明一并保留。[项目许可](LICENSE) · [JPEGENC 许可](third_party/JPEGENC/LICENSE) · [模型许可](third_party/PCEnhance/README.md) · [Qt 运行库声明](live/qt/licenses/NOTICE.txt)
+独立项目由 nicedayzhu 维护，采用 MIT 许可。掌机开发工具、JPEG 编码器、播放器依赖、字体和画质模型的作者与许可见完整致谢。[项目许可](LICENSE) · [完整致谢](docs/CREDITS.md) · [开发与构建](docs/DEVELOPMENT.md)

@@ -1,1 +1,35 @@
+#include <winver.h>
+
+#ifdef LIVE_CLIENT_DLL
+#define LIVE_FILE_TYPE VFT_DLL
+#define LIVE_DESCRIPTION "3DS Live Qt receiver"
+#else
 1 ICON "assets/3ds-live.ico"
+#define LIVE_FILE_TYPE VFT_APP
+#define LIVE_DESCRIPTION "3DS Live"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION LIVE_VERSION_MAJOR,LIVE_VERSION_MINOR,LIVE_VERSION_PATCH,0
+ PRODUCTVERSION LIVE_VERSION_MAJOR,LIVE_VERSION_MINOR,LIVE_VERSION_PATCH,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE LIVE_FILE_TYPE
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "nicedayzhu"
+            VALUE "FileDescription", LIVE_DESCRIPTION
+            VALUE "FileVersion", LIVE_VERSION_STRING
+            VALUE "ProductName", "3DS Live"
+            VALUE "ProductVersion", LIVE_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

@@ -11,12 +11,22 @@ def align64(size):
     return (size + 63) & ~63
 
 
+def title_version(release):
+    major, minor, micro = map(int, release.strip().split("."))
+    # Pre-release installations used title versions through 1.2.13. Reserve
+    # the first two major values so official releases update the same title ID.
+    if not (0 <= major < 62 and 0 <= minor < 64 and 0 <= micro < 16):
+        raise ValueError("release version exceeds the remaining CIA version range")
+    return ((major + 2) << 10) | (minor << 4) | micro
+
+
 def main():
-    cia_path, version_path = map(Path, sys.argv[1:])
-    major, minor, micro = map(int, version_path.read_text().strip().split("."))
-    if not (0 <= major < 64 and 0 <= minor < 64 and 0 <= micro < 16):
-        raise ValueError("CIA release version exceeds the 6/6/4-bit format")
-    version = major << 10 | minor << 4 | micro
+    action, version_file = sys.argv[1:]
+    version = title_version(Path(version_file).read_text(encoding="ascii"))
+    if action == "--print":
+        print(version)
+        return
+    cia_path = Path(action)
     cia = bytearray(cia_path.read_bytes())
     header, _, _, certs, ticket, tmd = struct.unpack_from("<IHHIII", cia)
     ticket_at = align64(header) + align64(certs)

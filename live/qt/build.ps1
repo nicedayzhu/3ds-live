@@ -248,7 +248,7 @@ if ($Zip) {
                 Add-SourceFile $item.FullName ([IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/'))
             }
         }
-        foreach ($file in 'LICENSE','codec/source/live_codec.c','codec/source/live_audio.c','codec/host/live_audio_output.c') {
+        foreach ($file in 'LICENSE','VERSION','codec/source/live_codec.c','codec/source/live_audio.c','codec/host/live_audio_output.c') {
             Add-SourceFile "$repo/$file" $file
         }
         foreach ($name in $spanNotices + $spanModels) {
