@@ -6,7 +6,64 @@
 #include "live_pacing.h"
 
 static LiveAudioQueue q;
+
+static void redundancy_history(void) {
+    LiveAudioHistory h={0};
+    uint8_t a[3*LIVE_AUDIO_RECORD_BYTES]={1},b[3*LIVE_AUDIO_RECORD_BYTES]={2};
+    assert(!live_audio_history_repeat(&h,100,80));
+    live_audio_history_store(&h,a,1,100);
+    assert(!live_audio_history_repeat(&h,115,80));
+    live_audio_history_store(&h,b,3,115);
+    const LiveAudioBatch *repeat=live_audio_history_repeat(&h,130,80);
+    assert(repeat&&repeat->count==1&&repeat->records[0]==1);
+    assert(!live_audio_history_repeat(&h,181,80)); /* expired before playout */
+    live_audio_history_store(&h,a,2,130);
+    repeat=live_audio_history_repeat(&h,145,80);
+    assert(repeat&&repeat->count==3&&repeat->records[0]==2);
+    live_audio_history_reset(&h);
+    assert(!live_audio_history_repeat(&h,146,80)); /* changed peer */
+    live_audio_history_store(&h,a,1,146);
+    assert(!live_audio_history_repeat(&h,160,80));
+}
+
+static void replay_audio_loss(void) {
+    /* Relative datagram indices missing from a 45 s handheld Wi-Fi capture.
+     * The 3,031 received R9A1 headers all confirmed three fresh DSP blocks
+     * per slot. No audio samples or network addresses are in this fixture. */
+    enum {slots=3068};
+    const unsigned lost[]={37,172,173,254,261,262,341,342,541,545,546,715,716,722,855,856,857,
+        1198,1380,1381,1382,1383,1384,1414,1415,1416,1419,1420,1421,1422,1423,1424,1427,
+        2169,2773,2774,2956};
+    bool missing[slots]={0},covered[slots]={0};
+    for(unsigned i=0;i<sizeof lost/sizeof *lost;i++)missing[lost[i]]=true;
+    uint8_t fresh[3*LIVE_AUDIO_RECORD_BYTES]={0};
+    LiveAudioHistory h={0};
+    unsigned old_loss=0,new_loss=0;
+    for(unsigned i=0;i<slots;i++) {
+        uint64_t now=(uint64_t)i*14666;
+        const LiveAudioBatch *copy=live_audio_history_repeat(&h,now,LIVE_AUDIO_MAX_AGE_US);
+        if(!missing[i]) {
+            covered[i]=true;
+            if(copy) {
+                unsigned original;
+                memcpy(&original,copy->records,sizeof original);
+                assert(copy->count==3&&original+2==i);
+                covered[original]=true;
+            }
+        }
+        memcpy(fresh,&i,sizeof i);
+        live_audio_history_store(&h,fresh,3,now);
+    }
+    for(unsigned i=2;i<slots-2;i++) {
+        if(missing[i]&&missing[i+1])old_loss+=3;
+        if(!covered[i])new_loss+=3;
+    }
+    assert(old_loss==57&&new_loss==27);
+    printf("45 s R9A1 loss replay: permanently missing blocks %u -> %u\n",old_loss,new_loss);
+}
 int main(void) {
+    redundancy_history();
+    replay_audio_loss();
     int16_t pcm[LIVE_AUDIO_SAMPLES*LIVE_AUDIO_CHANNELS];
     LiveAudioCapture out;
     live_audio_queue_init(&q);

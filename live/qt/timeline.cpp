@@ -3,6 +3,7 @@
 #include "transport.h"
 #include "live_audio.h"
 #include <QtEndian>
+#include <QVarLengthArray>
 #include <QPainter>
 #include <chrono>
 #include <cmath>
@@ -11,6 +12,8 @@
 extern "C" int live_audio_output_48k(const uint8_t *, size_t, double, int64_t, uint8_t *, size_t);
 namespace live {
 static constexpr qint64 frameHistoryUs = 1000000;
+// Bound the unconfirmed tail after the last valid audio datagram during disconnects.
+static constexpr qint64 audioActivityUs = 250000;
 static int newerPanels(const SourceFrame &source, const std::array<std::optional<PanelStamp>,2> &shown) {
     int mask = 0;
     for (int i = 0; i < 2; ++i)
@@ -28,6 +31,11 @@ void Timeline::reset(quint32 id) {
     active = true;
     mapped = false;
     audioAnchor = false;
+    audioEnabled = true;
+    ++audioGeneration;
+    lastAudioWall.reset();
+    previousOutputEnd.reset();
+    outputSamples = outputSource = outputConcealed = outputGap = outputLongestGap = outputDrains = 0;
     frames.clear();
     lastPanels = {};
     lastChoiceKey.reset();
@@ -353,7 +361,8 @@ void Timeline::addAudio(QByteArrayView b, qint64 wall) {
         }
         double pts = double(observe(qFromLittleEndian<quint32>(p + 4), wall));
         double expected = anchorPts + qint32(seq - anchorSeq) * duration;
-        if (!audioAnchor || std::abs(expected - pts) > 12000) {
+        const bool reanchored = !audioAnchor || std::abs(expected - pts) > 12000;
+        if (reanchored) {
             anchorSeq = seq;
             anchorPts = pts;
             audioAnchor = true;
@@ -373,25 +382,60 @@ void Timeline::addAudio(QByteArrayView b, qint64 wall) {
             order.pop_front();
         }
         audio[first] = std::move(data);
+        if (audioEnabled) {
+            if (reanchored || !lastAudioWall || wall - *lastAudioWall > audioActivityUs) {
+                ++audioGeneration;
+                previousOutputEnd.reset();
+                outputGap = 0;
+                audioFirstSample = first;
+            }
+            lastAudioWall = wall;
+        }
         ++audioBlocks;
     }
     while (audio.size() > 300)
         audio.erase(audio.begin());
 }
-QByteArray Timeline::pcm(qint64 wall, int samples) const {
+void Timeline::setAudioEnabled(bool enabled) {
+    std::lock_guard lock(mutex);
+    if (audioEnabled == enabled) return;
+    audioEnabled = enabled;
+    ++audioGeneration;
+    lastAudioWall.reset();
+    previousOutputEnd.reset();
+    outputGap = 0;
+}
+QByteArray Timeline::pcm(qint64 wall, int samples, SpeakerBlock *coverage) const {
     QByteArray out(samples * 4, 0);
     std::lock_guard lock(mutex);
+    if (coverage) {
+        *coverage = {};
+        coverage->generation = audioGeneration;
+    }
     if (!mapped || audio.empty())
         return out;
     qint64 start = qRound64(double(wall - offset - delay) * .048);
+    QVarLengthArray<quint8, 480> kind;
+    int trackFirst = 0, trackEnd = 0;
+    if (coverage && lastAudioWall) {
+        trackFirst = int(std::clamp<qint64>(audioFirstSample - start, 0, samples));
+        trackEnd = int(std::clamp<qint64>(qRound64(double(*lastAudioWall + delay + audioActivityUs - wall) * .048),
+                                         0, samples));
+        if (trackEnd > trackFirst) {
+            kind.resize(samples);
+            std::fill(kind.begin(), kind.end(), 0);
+        }
+    }
     auto it = audio.upper_bound(start);
     if (it != audio.begin())
         --it;
     for (; it != audio.end() && it->first < start + samples; ++it) {
         auto lo = std::max(it->first, start);
         auto hi = std::min<qint64>(it->first + it->second.size() / 4, start + samples);
-        if (hi > lo)
+        if (hi > lo) {
             memcpy(out.data() + (lo - start) * 4, it->second.constData() + (lo - it->first) * 4, (hi - lo) * 4);
+            if (!kind.isEmpty()) std::fill(kind.begin() + (lo - start), kind.begin() + (hi - start), 1);
+        }
 
         const auto next = std::next(it);
         if (next == audio.end()) continue;
@@ -406,6 +450,7 @@ QByteArray Timeline::pcm(qint64 wall, int samples) const {
         for (qint64 at = std::max(start, gapStart); at < end; ++at) {
             const qint64 left = at - gapStart, right = gapEnd - at - 1;
             if (left >= edge && right >= edge) continue;
+            if (!kind.isEmpty()) kind[at - start] = 2;
             for (int channel = 0; channel < 2; ++channel) {
                 int mixed = 0;
                 if (left < edge) {
@@ -420,7 +465,46 @@ QByteArray Timeline::pcm(qint64 wall, int samples) const {
             }
         }
     }
+    if (!kind.isEmpty()) {
+        auto &c = *coverage;
+        c.first = start + trackFirst;
+        c.samples = trackEnd - trackFirst;
+        for (int n = trackFirst; n < trackEnd; ++n) {
+            if (kind[n] == 1) {
+                ++c.source;
+                c.trailingGap = 0;
+            } else {
+                c.concealed += kind[n] == 2;
+                if (!c.source) ++c.leadingGap;
+                c.longestGap = std::max(c.longestGap, ++c.trailingGap);
+            }
+        }
+    }
     return out;
+}
+void Timeline::speakerSubmitted(const SpeakerBlock &c, bool queueDrained) {
+    std::lock_guard lock(mutex);
+    if (c.generation != audioGeneration) return;
+    if (!c.samples) {
+        previousOutputEnd.reset();
+        outputGap = 0;
+        return;
+    }
+    if (previousOutputEnd && queueDrained) ++outputDrains;
+    if (!previousOutputEnd || std::abs(c.first - *previousOutputEnd) > 1 || queueDrained) outputGap = 0;
+    outputLongestGap = std::max({outputLongestGap, qint64(c.longestGap), outputGap + c.leadingGap});
+    outputGap = c.source ? c.trailingGap : outputGap + c.samples;
+    previousOutputEnd = c.first + c.samples;
+    outputSource += c.source;
+    outputConcealed += c.concealed;
+    outputSamples += c.samples;
+}
+QJsonObject Timeline::speakerStats() const {
+    std::lock_guard lock(mutex);
+    return {{"session", qint64(session)}, {"sample_rate", 48000}, {"submitted_samples", outputSamples},
+            {"source_samples", outputSource}, {"missing_samples", outputSamples - outputSource},
+            {"concealed_samples", outputConcealed}, {"longest_missing_samples", outputLongestGap},
+            {"queue_drains", outputDrains}};
 }
 Speaker::Speaker(Timeline &timeline) {
     worker.reset(QThread::create([this, &timeline] {
@@ -447,6 +531,7 @@ Speaker::Speaker(Timeline &timeline) {
         }
         qint64 next = clockUs();
         size_t i = 0;
+        bool primed = false;
         while (!stop) {
             auto &h = headers[i];
             if (h.dwFlags & WHDR_INQUEUE) {
@@ -454,15 +539,22 @@ Speaker::Speaker(Timeline &timeline) {
                 continue;
             }
             next = std::max(next, clockUs());
-            auto data = timeline.pcm(next, 480);
-            if (mute)
+            const bool muted = mute.load();
+            SpeakerBlock coverage;
+            auto data = timeline.pcm(next, 480, &coverage);
+            if (muted) {
+                coverage.samples = 0;
                 memset(h.lpData, 0, 1920);
-            else
+            } else
                 memcpy(h.lpData, data.constData(), 1920);
+            const bool drained = primed && std::all_of(headers.begin(), headers.end(),
+                [](const WAVEHDR &header) { return (header.dwFlags & WHDR_DONE) != 0; });
             if (waveOutWrite(device, &h, sizeof(h)) != MMSYSERR_NOERROR)
                 break;
+            timeline.speakerSubmitted(coverage, drained);
             next += 10000;
             i = (i + 1) % headers.size();
+            if (!i) primed = true;
         }
         waveOutReset(device);
         for (auto &h : headers)

@@ -81,10 +81,15 @@ void __ctru_exit(int code)
 static u32 arenaNext = 0x09000000u;
 static u32 arenaSizes[8], arenaCount;
 
-void *live_map_pages(u32 address, u32 bytes)
+bool live_pages_available(u32 bytes)
 {
     const u32 reserve = 4 * 1024 * 1024;
-    if (osGetMemRegionFree(MEMREGION_SYSTEM) < bytes + reserve) return NULL;
+    return osGetMemRegionFree(MEMREGION_SYSTEM) >= (u64)bytes + reserve;
+}
+
+void *live_map_pages(u32 address, u32 bytes)
+{
+    if (!live_pages_available(bytes)) return NULL;
     u32 result;
     if (R_FAILED(svcControlMemory(&result, address, 0, bytes, MEMOP_ALLOC, MEMPERM_READWRITE))) return NULL;
     return (void *)result;
@@ -117,6 +122,15 @@ static void release_arenas(void)
     }
 }
 
+#ifdef LIVE_FRAME_TIMING
+static void *allocate_timing(u32 bytes)
+{
+    /* LCD DMA buffers are mapped on first capture, after the optional ring. */
+    if (!live_pages_available(bytes + LIVE_CAPTURE_MAX_DMA_BYTES)) return NULL;
+    return allocate(bytes);
+}
+#endif
+
 typedef enum { MODULE_IDLE, MODULE_SEARCHING, MODULE_PAIRED, MODULE_ERROR, MODULE_SLEEP, MODULE_STOPPED } ModuleState;
 
 static void update_status(ModuleState state, Result result, LedState light)
@@ -127,18 +141,15 @@ static void update_status(ModuleState state, Result result, LedState light)
         [LED_STATE_STREAMING] = "receiving", [LED_STATE_ERROR] = "error"
     };
     static int lastLight = -1, lastState = -1;
-    static unsigned failures, polls;
+    static unsigned failures;
     static u64 nextWrite;
     static Result ledResult, lastResult;
     const bool changed = (int)light != lastLight;
     const bool statusChanged = changed || (int)state != lastState || result != lastResult;
     const bool persistent = light == LED_STATE_READY || light == LED_STATE_WAITING || light == LED_STATE_STREAMING;
-    if (!statusChanged) {
-        if (!clockService || failures >= 3 || (!persistent && !failures)) return;
-        if (++polls < 64) return;
-    }
-    polls = 0;
+    if (!statusChanged && (!clockService || failures >= 3 || (!persistent && !failures))) return;
     const u64 now = svcGetSystemTick();
+    if (!statusChanged && now < nextWrite) return;
     if (changed) failures = 0;
     const Result previousLedResult = ledResult;
     // System notifications share this lamp. Restore a persistent pattern after
@@ -164,6 +175,77 @@ static void update_status(ModuleState state, Result result, LedState light)
     }
 }
 
+typedef struct {
+    ModuleState state;
+    Result result;
+    LedState light;
+} ModuleStatus;
+
+static ModuleStatus requestedStatus;
+static Thread statusWorker;
+static LightEvent statusWake;
+static LightLock statusLock;
+static bool statusStopping;
+
+static void status_main(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        LightLock_Lock(&statusLock);
+        const ModuleStatus next = requestedStatus;
+        const bool stopping = statusStopping;
+        LightLock_Unlock(&statusLock);
+        update_status(next.state, next.result, next.light);
+        live_flush_network_report(stopping);
+        if (stopping) return;
+        /* Changes signal immediately. Periodic wakes restore a persistent
+         * LED or retry a failed PTM call on its original wall clock. */
+        LightEvent_WaitTimeout(&statusWake, 250000000);
+    }
+}
+
+static void start_status_worker(void)
+{
+    LightLock_Init(&statusLock);
+    LightEvent_Init(&statusWake, RESET_ONESHOT);
+    statusStopping = false;
+    statusWorker = threadCreate(status_main, NULL, 8192, 0x3f, 1, false);
+    if (!statusWorker) live_flush_network_report(true);
+}
+
+static void publish_status(ModuleState state, Result result, LedState light)
+{
+    const ModuleStatus next = {state, result, light};
+    if (!statusWorker) {
+        requestedStatus = next;
+        update_status(state, result, light);
+        live_flush_network_report(false);
+        return;
+    }
+    /* Only the main thread changes the desired status. The worker copies
+     * it under lock and releases the lock before touching PTM or the SD. */
+    if (state == requestedStatus.state && result == requestedStatus.result && light == requestedStatus.light) return;
+    LightLock_Lock(&statusLock);
+    requestedStatus = next;
+    LightLock_Unlock(&statusLock);
+    LightEvent_Signal(&statusWake);
+}
+
+static void stop_status_worker(void)
+{
+    if (!statusWorker) {
+        live_flush_network_report(true);
+        return;
+    }
+    LightLock_Lock(&statusLock);
+    statusStopping = true;
+    LightLock_Unlock(&statusLock);
+    LightEvent_Signal(&statusWake);
+    threadJoin(statusWorker, U64_MAX);
+    threadFree(statusWorker);
+    statusWorker = NULL;
+}
+
 static Result start_stream(void)
 {
     s64 newModel = 0;
@@ -173,13 +255,17 @@ static Result start_stream(void)
     Result rc = live_start(allocate);
     if (R_SUCCEEDED(rc)) {
         if (capture_start()) {
-            live_timing_prepare(allocate);
+            live_timing_prepare(allocate_timing);
+            /* Reserve the capture, encode and socket threads first. If the
+             * optional worker cannot start, publish_status runs synchronously. */
+            start_status_worker();
             return 0;
         }
         capture_stop();
         live_stop();
         rc = -7;
     }
+    live_flush_network_report(true);
     release_arenas();
     return rc;
 }
@@ -219,6 +305,7 @@ static void stop_stream(void)
 {
     capture_stop();
     live_stop();
+    stop_status_worker();
     release_arenas();
     set_boost(false);
 }
@@ -244,7 +331,7 @@ int main(void)
     }
     LedState idleLight = LED_STATE_READY;
     Result startResult = 0;
-    update_status(MODULE_IDLE, 0, idleLight);
+    publish_status(MODULE_IDLE, 0, idleLight);
     const u32 toggleKeys = KEY_R | KEY_SELECT;
     bool running = false, held = false, awake = true, resume = false, quit = false, previousPeer = false;
     u64 homeResumeAt = 0;
@@ -324,11 +411,11 @@ int main(void)
         else if (running) state = previousPeer ? MODULE_PAIRED : MODULE_SEARCHING;
         else if (R_FAILED(startResult)) state = MODULE_ERROR;
         const LedState light = status_led_state(awake, running, running && previousPeer && live_receiver_has_video(), idleLight);
-        update_status(state, startResult, light);
+        publish_status(state, startResult, light);
         svcSleepThread(running && previousPeer && !homeResumeAt ? 2000000 : 12000000);
     }
     if (running) stop_stream();
     if (notification) svcCloseHandle(notification);
-    update_status(MODULE_STOPPED, 0, LED_STATE_OFF);
+    publish_status(MODULE_STOPPED, 0, LED_STATE_OFF);
     return 0;
 }

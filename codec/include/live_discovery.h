@@ -106,4 +106,10 @@ static inline bool live_discover_expire(LiveDiscovery *state, uint64_t now,
     return true;
 }
 
+/* A valid control from the paired media endpoint proves the PC is still
+ * there even if a unicast discovery probe or its specific reply was lost. */
+static inline void live_discover_activity(LiveDiscovery *state, uint32_t address, uint64_t now) {
+    if (state->peer && state->peer == address) state->last_ack = now;
+}
+
 #endif

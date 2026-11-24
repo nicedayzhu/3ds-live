@@ -2,6 +2,8 @@
 #include "runtime_paths.h"
 #include "viewer_native.h"
 #include "receiver.h"
+#include "stream_presets.h"
+#include "live_fps.h"
 #include "recording.h"
 #include "model_check.h"
 #include "effect_load.h"
@@ -18,8 +20,9 @@ static const QMap<QString, QString> labels = {{"off", "原始"},
                                               {"span", "2× 实时超分 · SPAN"}};
 struct Options {
     QString ip, mode = "off", motion = "off", rifePrecision = "fp32", record, rtsp, stats, models;
-    int port = 8001, scale = 1, fps = 30, rate = 800000, delay = 100;
-    bool mute = false, debug = false;
+    int port = 8001, scale = 1, fps = 30, rate = 800000, jpegQuality = 0, delay = 100;
+    std::optional<int> packetPacing;
+    bool adaptiveRate = true, mute = false, debug = false;
 };
 struct PanelCadence {
     qint64 count = 0, previousCount = 0, last = 0, longest = 0, longGaps = 0;
@@ -72,21 +75,35 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     arg("interpolate", "off, flow or rife", "off");
     arg("rife-precision", "RIFE inference precision: fp32 (default) or fp16");
     arg("scale", "Display scale 1 or 2", "1");
-    arg("fps", "Source FPS", "30");
+    arg("fps", "Source FPS (15, 20, 24 or 30)", "30");
     arg("rate", "Sender byte/s ceiling", "800000");
+    arg("jpeg-quality", "Handheld JPEG quality target: 0 (automatic), 40, 60, 70 or 80", "0");
+    arg("stream-preset", "Fixed-rate streaming settings: hd30, balanced30 or low24. Explicit fps, rate and JPEG options override the preset.");
     arg("delay", "Playout delay in ms (100 standard, 160 for FBCNN)", "100");
     arg("record", "Save MP4 on launch");
     arg("rtsp", "Publish to an RTSP server");
     arg("seconds", "Automatically close after this many seconds");
     arg("trace", "Write source, presentation and recording events as JSON lines");
+    arg("packet-pacing", "Compare handheld send timing: baseline or spaced (requires a compatible handheld)");
     arg("stats", "Append diagnostic snapshots as JSON lines");
     arg("models", "ONNX model directory", live::runtimeDirectory().filePath("models"));
     arg("check-models", "Run comma-separated native model checks and write results to --stats");
     cli.addOption({"mute", "Mute speakers"});
     cli.addOption({"debug", "Open F12 diagnostics"});
     cli.addOption({"preview", "Open preview directly"});
+    cli.addOption({"fixed-rate", "Keep the requested sender rate cap fixed"});
+    cli.addOption({"adaptive-rate", "Adapt only the sender rate cap to the connection"});
     cli.process(app);
     Options o;
+    if (cli.isSet("packet-pacing")) {
+        const auto mode = cli.value("packet-pacing");
+        if (mode == "baseline") o.packetPacing = 0;
+        else if (mode == "spaced") o.packetPacing = 1;
+        else {
+            qWarning("--packet-pacing expects baseline or spaced");
+            return 2;
+        }
+    }
     o.models = cli.value("models");
     o.stats = cli.value("stats");
     QSettings prefs;
@@ -119,8 +136,29 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     o.mode = cli.value("enhance");
     o.motion = cli.value("interpolate");
     o.scale = cli.value("scale").toInt();
-    o.fps = cli.value("fps").toInt();
-    o.rate = cli.value("rate").toInt();
+    const StreamPreset *preset = nullptr;
+    if (cli.isSet("stream-preset")) {
+        for (const auto &candidate : streamPresets)
+            if (cli.value("stream-preset") == candidate.id) preset = &candidate;
+        if (!preset) {
+            qWarning("--stream-preset expects hd30, balanced30 or low24");
+            return 2;
+        }
+    }
+    if (cli.isSet("fixed-rate") && cli.isSet("adaptive-rate")) {
+        qWarning("Choose one rate control mode");
+        return 2;
+    }
+    o.fps = preset && !cli.isSet("fps") ? preset->fps : cli.value("fps").toInt();
+    o.rate = preset && !cli.isSet("rate") ? preset->rate : cli.value("rate").toInt();
+    o.adaptiveRate = cli.isSet("adaptive-rate") || (!preset && !cli.isSet("fixed-rate"));
+    bool qualityParsed = false;
+    o.jpegQuality = cli.value("jpeg-quality").toInt(&qualityParsed);
+    if (!qualityParsed || !isSourceJpegQuality(o.jpegQuality)) {
+        qWarning("--jpeg-quality expects 0, 40, 60, 70 or 80");
+        return 2;
+    }
+    if (preset && !cli.isSet("jpeg-quality")) o.jpegQuality = preset->jpegQuality;
     o.delay = cli.value("delay").toInt();
     o.record = cli.value("record");
     o.rtsp = cli.value("rtsp");
@@ -132,8 +170,14 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         o.mode = prefs.value("mode", "off").toString();
         o.motion = prefs.value("motion", "off").toString();
         o.scale = prefs.value("scale", 1).toInt();
-        o.fps = prefs.value("fps", 30).toInt();
+        const int savedFps = prefs.value("fps", 30).toInt();
+        o.fps = int(live_migrate_fps(savedFps));
+        if (o.fps != savedFps) prefs.setValue("fps", o.fps);
         o.rate = prefs.value("rate", 800000).toInt();
+        o.adaptiveRate = prefs.value("adaptiveRate", true).toBool();
+        o.jpegQuality = prefs.value("jpegQuality", 0).toInt();
+        if (!isSourceJpegQuality(o.jpegQuality))
+            o.jpegQuality = 0;
         o.mute = prefs.value("muted", false).toBool();
         if (!validIp(o.ip))
             o.ip.clear();
@@ -145,7 +189,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             o.motion = "off";
         if (o.scale != 1 && o.scale != 2)
             o.scale = 1;
-        if (!QList<int>{15, 20, 24, 30}.contains(o.fps))
+        if (!live_valid_fps(o.fps))
             o.fps = 30;
         if (!rates().contains(o.rate))
             o.rate = 800000;
@@ -154,10 +198,14 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         o.scale = pictureScale(o.mode, o.scale);
     if (!cli.isSet("delay") && usesFbcnn(o.mode))
         o.delay = 160;
+    if (!live_valid_fps(o.fps)) {
+        qWarning("--fps expects 15, 20, 24 or 30");
+        return 2;
+    }
     if ((!o.ip.isEmpty() && QHostAddress(o.ip).protocol() != QAbstractSocket::IPv4Protocol) || o.port < 1 ||
         o.port > 65535 || !labels.contains(o.mode) || !QStringList{"off", "rife", "flow"}.contains(o.motion) ||
         (o.scale != 1 && o.scale != 2) || o.scale != pictureScale(o.mode, o.scale) ||
-        !QList<int>{15, 20, 24, 30}.contains(o.fps) || !rates().contains(o.rate) || o.delay < 20 ||
+        !rates().contains(o.rate) || o.delay < 20 ||
         o.delay > 500 || (!o.record.isEmpty() && QFileInfo::exists(o.record)) ||
         (!o.rtsp.isEmpty() && QUrl(o.rtsp).scheme() != "rtsp"))
         return 2;
@@ -176,7 +224,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     auto listen = [&] {
         receiver.reset();
         receiver = std::make_unique<Receiver>(timeline, pipeline, QHostAddress(o.ip), o.port, o.fps, o.rate,
-                                              handheldDiscoveryPort);
+                                              handheldDiscoveryPort, o.jpegQuality, o.adaptiveRate, o.packetPacing);
     };
     listen();
     QJsonObject modes;
@@ -191,6 +239,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                              {"ip", o.ip},
                              {"scale", o.scale},
                              {"port", o.port},
+                             {"jpegQuality", o.jpegQuality},
+                             {"adaptiveRate", o.adaptiveRate},
                              {"rtsp", o.rtsp},
                              {"interpolate", o.motion},
                              {"rife_precision", o.rifePrecision},
@@ -208,11 +258,11 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             if (r <= max)
                 caps.append(r);
         for (int f : {15, 20, 24, 30})
-            if (mask & (1 << f))
+            if (mask & live_fps_flag(f))
                 speeds.append(f);
         updateView(view, {{"fpsOptions", speeds}, {"rateOptions", caps}, {"fps", o.fps}, {"rate", o.rate}});
     };
-    int mask = (1 << 15) | (1 << 20) | (1 << 24) | (1 << 30), max = 2000000;
+    int mask = LIVE_FPS_MASK, max = 2000000;
     options(mask, max);
     updateView(view, {{"muted", o.mute}});
     std::unique_ptr<Recording> recording, publish;
@@ -244,7 +294,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
            lastPresentWall = 0, largestGap = 0;
     qint64 lastSourceWall = 0, sourceBucketGap = 0;
     quint32 lastSourceSession = 0;
-    std::optional<SourceFrame> lastRealBottom;
+    std::deque<qint64> recentSourcePresentations;
+    std::array<std::optional<SourceFrame>,2> lastShownPanels;
     std::array<PanelCadence,2> panelCadence{};
     qint64 bottomGenerated = 0, previousBottomGenerated = 0, canvasChoices = 0, previousCanvasChoices = 0;
     int exitCode = 0, fallbackWindows = 0;
@@ -268,6 +319,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         prefs.setValue("port", o.port);
         prefs.setValue("fps", o.fps);
         prefs.setValue("rate", o.rate);
+        prefs.setValue("adaptiveRate", o.adaptiveRate);
+        prefs.setValue("jpegQuality", o.jpegQuality);
         prefs.setValue("mode", requestedMode);
         prefs.setValue("motion", requestedMotion);
         prefs.setValue("scale", o.scale);
@@ -331,17 +384,23 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             }
             if (type == "limit") {
                 const int hz = e["fps"].toInt(o.fps), cap = e["rate"].toInt(o.rate);
-                if (e.contains("fps") && (hz < 0 || hz > 30 || !(mask & (1 << hz))))
+                const int jpegQuality = e["jpegQuality"].toInt(o.jpegQuality);
+                const bool adaptive = e["adaptiveRate"].toBool(o.adaptiveRate);
+                if (!live_valid_fps(hz) || !isSourceJpegQuality(jpegQuality))
+                    continue;
+                if (e.contains("fps") && !(mask & live_fps_flag(hz)))
                     continue;
                 if (e.contains("rate") && (!rates().contains(cap) || cap > max))
                     continue;
-                if (hz != o.fps || cap != o.rate) {
+                if (hz != o.fps || cap != o.rate || jpegQuality != o.jpegQuality || adaptive != o.adaptiveRate) {
                     o.fps = hz;
                     o.rate = cap;
-                    receiver->configure(hz, cap);
+                    o.jpegQuality = jpegQuality;
+                    o.adaptiveRate = adaptive;
+                    receiver->configure(hz, cap, jpegQuality, adaptive);
                     remember();
                 }
-                updateView(view, {{"fps", hz}, {"rate", cap}});
+                updateView(view, {{"fps", hz}, {"rate", cap}, {"jpegQuality", jpegQuality}, {"adaptiveRate", adaptive}});
             }
             if (type == "apply") {
                 QString ip = e["ip"].toString(), url = e["rtsp"].toString();
@@ -350,16 +409,24 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                     continue;
                 }
                 bool changed = ip != o.ip || e["port"].toInt() != o.port;
-                const bool limitsChanged = e["fps"].toInt() != o.fps || e["rate"].toInt() != o.rate;
+                const int jpegQuality = e["jpegQuality"].toInt(o.jpegQuality);
+                const bool adaptive = e["adaptiveRate"].toBool(o.adaptiveRate);
+                if (!live_valid_fps(e["fps"].toInt()) || !isSourceJpegQuality(jpegQuality))
+                    continue;
+                const bool limitsChanged = e["fps"].toInt() != o.fps || e["rate"].toInt() != o.rate ||
+                                           jpegQuality != o.jpegQuality || adaptive != o.adaptiveRate;
                 o.ip = ip;
                 o.port = e["port"].toInt();
                 o.fps = e["fps"].toInt();
                 o.rate = e["rate"].toInt();
+                o.jpegQuality = jpegQuality;
+                o.adaptiveRate = adaptive;
                 if (changed)
                     listen();
                 else if (limitsChanged)
-                    receiver->configure(o.fps, o.rate);
-                updateView(view, {{"fps", o.fps}, {"rate", o.rate}});
+                    receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate);
+                updateView(view, {{"fps", o.fps}, {"rate", o.rate}, {"jpegQuality", o.jpegQuality},
+                                  {"adaptiveRate", o.adaptiveRate}});
                 int scale = e["scale"].toInt();
                 QString motion = e["motion"].toString();
                 QString precision = e["rife_precision"].toString(o.rifePrecision);
@@ -442,17 +509,21 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         if (!im.isNull() && choice.id != lastPts) {
             lastPts = choice.id;
             ++canvasChoices;
-            for (int i = 0; i < 2; ++i)
-                if (choice.updatedPanels & (1 << i))
+            for (int i = 0; i < 2; ++i) {
+                if (choice.updatedPanels & (1 << i)) {
                     panelCadence[i].select(choice.source.session, choice.time);
-            bottomGenerated += bool(choice.generatedPanels & 2);
-            if ((choice.updatedPanels & 2) && choice.source.panels[1]) {
-                lastRealBottom = choice.source;
-                lastRealBottom->pts = choice.source.panels[1]->pts;
+                    if (choice.source.panels[i]) {
+                        lastShownPanels[i] = choice.source;
+                        lastShownPanels[i]->pts = choice.source.panels[i]->pts;
+                    }
+                }
             }
+            bottomGenerated += bool(choice.generatedPanels & 2);
             const bool realTop = choice.updatedPanels & 1;
             if (realTop || synthetic) ++presented;
             if (realTop) {
+                if (lastSourceSession != choice.source.session) recentSourcePresentations.clear();
+                recentSourcePresentations.push_back(choice.time);
                 if (lastSourceWall && lastSourceSession == choice.source.session)
                     sourceBucketGap = std::max(sourceBucketGap, now - lastSourceWall);
                 lastSourceWall = now;
@@ -556,6 +627,21 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         int delta = int(presented - previousCount), sourceDelta = delta - int(intermediate - previousSynthetic);
         report["time"] = QTime::currentTime().toString("HH:mm:ss");
         report["wall_us"] = now;
+        while (!recentSourcePresentations.empty() && recentSourcePresentations.front() < now - 10000000)
+            recentSourcePresentations.pop_front();
+        auto window = report.value("delivery_window").toObject();
+        if (!window.isEmpty() && lastSourceSession == report.value("session").toInteger()) {
+            const auto begin = window.value("start_us").toInteger();
+            const auto end = window.value("end_us").toInteger();
+            if (begin > 0 && end > begin && end <= now && begin >= now - 10000000) {
+                const auto first = std::upper_bound(recentSourcePresentations.begin(), recentSourcePresentations.end(), begin);
+                const auto last = std::upper_bound(first, recentSourcePresentations.end(), end);
+                const auto count = qint64(last-first);
+                window["presented_tops"] = count;
+                window["presented_top_fps"] = count * 1000000. / (end-begin);
+                report["delivery_window"] = window;
+            }
+        }
         report["fps_presented"] = delta / interval;
         report["fps_source_presented"] = sourceDelta / interval;
         report["fps_generated"] = (delta - sourceDelta) / interval;
@@ -572,9 +658,12 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         report["fps_canvas_presented"] = (canvasChoices - previousCanvasChoices) / interval;
         previousCanvasChoices = canvasChoices;
         previousBottomGenerated = bottomGenerated;
-        if (lastRealBottom && report["session"].toInteger() == lastRealBottom->session)
-            report["bottom_source_age_ms"] =
-                std::max<qint64>(0, now - timeline.deadline(*lastRealBottom) + timeline.delay) / 1000.;
+        for (int i=0; i<2; ++i) {
+            const auto &panel = lastShownPanels[i];
+            if (panel && report["session"].toInteger() == panel->session)
+                report[i ? "bottom_source_age_ms" : "top_source_age_ms"] =
+                    std::max<qint64>(0, now - timeline.deadline(*panel) + timeline.delay) / 1000.;
+        }
         report["source_interval_max_gap_ms"] = sourceBucketGap / 1000.;
         sourceBucketGap = 0;
         report["interval_max_gap_ms"] = bucketGap / 1000.;
@@ -602,6 +691,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         report["synthetic_at_presentation"] = intermediate;
         report["max_presentation_gap_ms"] = largestGap / 1000.;
         report["audio_device"] = speaker.opened.load();
+        report["speaker_output"] = timeline.speakerStats();
         report["muted"] = o.mute;
         report["stats_file"] = o.stats;
         report["recording"] =

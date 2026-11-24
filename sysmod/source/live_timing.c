@@ -22,7 +22,7 @@ _Static_assert(sizeof(TimingFrame) == 72 && offsetof(TimingFrame, encoded) == 16
 _Static_assert(sizeof(TimingHeader) == 56 && offsetof(TimingHeader, startTick) == 40, "R12T header layout");
 
 static TimingFrame *ring;
-static TimingFrame encoding, pendingFrame, sendingFrame;
+static TimingFrame encoding, pendingFrames[2], sendingFrame;
 static u32 capacity, retained, latestSeq, dataFragments;
 static u64 lastMarker;
 static bool prepared;
@@ -34,7 +34,7 @@ void live_timing_prepare(void *(*allocate)(u32)) {
     capacity = retained = latestSeq = 0;
     lastMarker = 0;
     ring = NULL;
-    encoding = pendingFrame = sendingFrame = (TimingFrame){0};
+    encoding = pendingFrames[0] = pendingFrames[1] = sendingFrame = (TimingFrame){0};
     LightLock_Init(&ringLock);
     for (u32 count = 16384; count >= 1024; count /= 2) {
         ring = allocate(count * sizeof(*ring));
@@ -74,21 +74,21 @@ static void complete(TimingFrame *frame, LiveTimingOutcome why) {
 }
 
 void live_timing_drop_encoded(LiveTimingOutcome why) { complete(&encoding, why); }
-void live_timing_drop_pending(LiveTimingOutcome why) { complete(&pendingFrame, why); }
+void live_timing_drop_pending(unsigned slot, LiveTimingOutcome why) { complete(&pendingFrames[slot], why); }
 
 /* The existing pair lock serializes publish/replace/claim. Each other frame
  * object has a single thread owner during capture. */
-void live_timing_publish(u64 queued) {
+void live_timing_publish(unsigned slot, u64 queued) {
     if (!capacity) return;
-    pendingFrame = encoding;
-    pendingFrame.queued = queued;
+    pendingFrames[slot] = encoding;
+    pendingFrames[slot].queued = queued;
     encoding.outcome = 0;
 }
-void live_timing_claim(void) {
+void live_timing_claim(unsigned slot) {
     if (!capacity) return;
-    sendingFrame = pendingFrame;
+    sendingFrame = pendingFrames[slot];
     sendingFrame.claimed = svcGetSystemTick();
-    pendingFrame.outcome = 0;
+    pendingFrames[slot].outcome = 0;
 }
 void live_timing_plan(u32 data, u32 all) {
     dataFragments = data;
@@ -118,7 +118,7 @@ bool live_timing_export(u32 session, u64 started) {
     if (!ring) return false;
     /* Both workers have joined. A pending pair can remain when the user stops. */
     live_timing_drop_encoded(TIMING_STOPPED);
-    live_timing_drop_pending(TIMING_STOPPED);
+    for (unsigned slot = 0; slot < 2; ++slot) live_timing_drop_pending(slot, TIMING_STOPPED);
     live_timing_finish(TIMING_STOPPED);
     TimingHeader head = {{'R','1','2','T'}, 1, sizeof(head), sizeof(*ring), session,
                          SYSCLOCK_ARM11, capacity, retained, latestSeq, 0, started, svcGetSystemTick()};

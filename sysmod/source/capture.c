@@ -9,7 +9,6 @@
 #define VRAM_MAPPED 0x1F000000u
 #define VRAM_BYTES 0x00600000u
 #define FCRAM_PHYS 0x20000000u
-#define MAX_STRIDE (240u * 4u * 2u)
 #define MIX_WORDS 160u
 
 typedef enum { BUFFER_FREE, CONVERT_PENDING, CONVERTED, CONVERT_FAILED } ConvertState;
@@ -19,6 +18,7 @@ typedef struct {
     u32 addr, observedAddr, selection, mode, stride, bytes, capacity, submittedPts;
     u64 captured, modeChanged, retryAfter, lastPoll;
     u32 lastSwapUs, retryDelayUs;
+    LiveVramCadence fixedVram;
     bool valid, wide, pendingChange, preciseSwap;
     u32 dmaMode, dmaStride;
     u64 dmaTick;
@@ -170,6 +170,7 @@ static void defer_retry(Screen *s, u64 now)
     // A static FCRAM screen may never swap again. Retry the missed capture
     // once the deadline expires even if the display still uses that buffer.
     s->captured = 0;
+    s->fixedVram = (LiveVramCadence){0};
     s->retryDelayUs = live_capture_retry_us(s->retryDelayUs, live_fps());
     s->retryAfter = now + (u64)SYSCLOCK_ARM11 * s->retryDelayUs / 1000000u;
 }
@@ -186,6 +187,7 @@ static void poll_screen(unsigned index, u64 now)
         s->stride = stride;
         s->valid = false;
         s->captured = 0;
+        s->fixedVram = (LiveVramCadence){0};
         s->modeChanged = now;
     }
     // Remember intervening swaps. A 60 Hz game can already be back on the same buffer when
@@ -193,6 +195,7 @@ static void poll_screen(unsigned index, u64 now)
     const bool changed = addr != s->observedAddr || selection != s->selection;
     const u32 nowUs = timestamp(now);
     if (changed) {
+        s->fixedVram = (LiveVramCadence){0};
         s->pendingChange = true;
         s->lastSwapUs = nowUs;
         s->preciseSwap = now - s->lastPoll <= SYSCLOCK_ARM11 * 3ull / 1000;
@@ -230,9 +233,12 @@ static void poll_screen(unsigned index, u64 now)
     if (now - s->modeChanged < SYSCLOCK_ARM11 / 5) return;
     const unsigned format = mode & 7;
     const u32 pixelBytes = format == 0 ? 4 : format == 1 ? 3 : 2;
-    if (format > 4 || stride < pixelBytes * 240 || stride > MAX_STRIDE) return;
-    if (s->captured && !live_capture_due(nowUs - timestamp(s->captured), live_fps(), changed,
-            s->pendingChange, s->preciseSwap, nowUs - s->lastSwapUs, in_vram(addr))) return;
+    if (format > 4 || stride < pixelBytes * 240 || stride > LIVE_CAPTURE_MAX_STRIDE) return;
+    const unsigned fps = live_fps();
+    const bool vram = in_vram(addr);
+    const u32 sinceSwap = nowUs - s->lastSwapUs;
+    if (s->captured && !live_capture_due(nowUs - timestamp(s->captured), fps, changed,
+            s->pendingChange, s->preciseSwap, sinceSwap, vram ? &s->fixedVram : NULL, nowUs)) return;
     s->wide = !index && !(mode & 0x60);
     s->bytes = (s->wide ? 800u : index ? 320u : 400u) * stride;
     s->addr = addr;
@@ -250,6 +256,7 @@ static void poll_screen(unsigned index, u64 now)
     }
     s->dma = copy_display(s);
     if (s->dma) {
+        if (vram && sinceSwap >= 100000u) live_vram_captured(&s->fixedVram, nowUs, fps);
         s->dmaTick = s->captured = now;
         s->dmaMode = mode;
         s->dmaStride = stride;
@@ -344,6 +351,7 @@ void capture_invalidate(void)
         s->valid = false;
         s->captured = 0;
         s->submittedPts = 0;
+        s->fixedVram = (LiveVramCadence){0};
         s->retryAfter = 0;
         s->retryDelayUs = 0;
         s->pendingChange = false;

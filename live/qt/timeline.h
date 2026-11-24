@@ -14,6 +14,12 @@ struct PresentedFrame {
     qint64 time = 0, id = 0;
     int updatedPanels = 0, generatedPanels = 0;
 };
+struct SpeakerBlock {
+    quint64 generation = 0;
+    qint64 first = 0;
+    int samples = 0, source = 0, concealed = 0;
+    int leadingGap = 0, trailingGap = 0, longestGap = 0;
+};
 class Timeline : public QObject {
     Q_OBJECT
     mutable std::mutex mutex;
@@ -47,6 +53,12 @@ class Timeline : public QObject {
     void notifyEarlierFrame(qint64 displayPts);
     void paceSource(Frame &frame, int fps);
     std::map<qint64, QByteArray> audio;
+    bool audioEnabled = true;
+    quint64 audioGeneration = 0;
+    std::optional<qint64> lastAudioWall, previousOutputEnd;
+    qint64 audioFirstSample = 0;
+    qint64 outputSamples = 0, outputSource = 0, outputConcealed = 0;
+    qint64 outputGap = 0, outputLongestGap = 0, outputDrains = 0;
     QSet<quint32> seen;
     std::deque<quint32> order;
     qint64 observe(quint32 raw, qint64 wall);
@@ -67,7 +79,10 @@ class Timeline : public QObject {
     PresentedFrame present(int *nextWakeMs = nullptr);
     PresentedFrame recorded(qint64 wall) const;
     void addAudio(QByteArrayView packet, qint64 wall);
-    QByteArray pcm(qint64 wall, int samples) const;
+    void setAudioEnabled(bool enabled);
+    QByteArray pcm(qint64 wall, int samples, SpeakerBlock *coverage = nullptr) const;
+    void speakerSubmitted(const SpeakerBlock &coverage, bool queueDrained);
+    QJsonObject speakerStats() const;
   signals:
     void earlierFrameReady();
 };

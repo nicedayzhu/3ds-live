@@ -3,7 +3,7 @@ CC ?= cc
 OUT := ../../build/native-tests
 CPPFLAGS += -I../../../codec/include
 CFLAGS += -O2 -std=c11 -Wall -Wextra -Werror
-TESTS := test_live test_pacing test_rate test_pair test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_module_install test_launcher_status test_launcher_language
+TESTS := test_live test_pacing test_rate test_pair test_repair_cache test_pending_queue test_jpeg_rows test_row_compression test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_module_install test_launcher_status test_launcher_language
 BINS := $(addprefix $(OUT)/,$(TESTS))
 
 .PHONY: check
@@ -16,7 +16,13 @@ $(OUT):
 $(OUT)/test_live: ../../../codec/source/live_codec.c
 $(OUT)/test_wide_capture: ../../../codec/source/live_jpeg_source.c
 $(OUT)/test_capture_schedule: CPPFLAGS += -I../../../sysmod/source
+$(OUT)/test_pacing: CPPFLAGS += -I../../../sysmod/source
+$(OUT)/test_pacing: ../../../sysmod/source/packet_report.h
 $(OUT)/test_capture_schedule: ../../../sysmod/source/capture_schedule.h
+$(OUT)/test_pending_queue: CPPFLAGS += -I../../../sysmod/source
+$(OUT)/test_pending_queue: ../../../sysmod/source/pending_queue.h
+$(OUT)/test_row_compression: CPPFLAGS += -I../../../sysmod/source -I../../../third_party/lz4
+$(OUT)/test_row_compression: ../../../sysmod/source/row_compression.h ../../../third_party/lz4/lz4.c ../../../third_party/lz4/lz4.h
 $(OUT)/test_status_led: CPPFLAGS += -I../../../sysmod/source
 $(OUT)/test_status_led: ../../../sysmod/source/status_led.h ../../../sysmod/source/status_led_pattern.h
 $(OUT)/test_module_install: CPPFLAGS += -I../../../app/source

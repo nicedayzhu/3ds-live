@@ -1,6 +1,8 @@
 #include "transport.h"
+#include "test_jpeg_rows.h"
 #include <cstdlib>
 #include <QDebug>
+#include <QRandomGenerator>
 using namespace live;
 static void require(bool ok, const char *reason) {
     if (!ok) {
@@ -81,6 +83,11 @@ static void senderLimitedRecovery() {
     require(!report(29, 25), "Network loss was mistaken for a slow sender");
     for (int i=0; i<3; ++i) report(10,10);
     require(!recovery.delivered(fps, rate, wall), "A stalled sender counted as recovered");
+    require(recovery.delivered(fps, rate, wall, true), "A quality-limited stream with full delivery could not recover");
+    report(0,0);
+    require(!recovery.delivered(fps, rate, wall, true), "A stationary send counter counted as delivery");
+    for (int i=0; i<3; ++i) report(10,8);
+    require(!recovery.delivered(fps, rate, wall, true), "Missing quality-limited frames counted as delivery");
     for (int i=0; i<3; ++i) report(27,27);
     ++status.sendFailures;
     require(!report(27,27), "Sender timeout counted as healthy delivery");
@@ -189,6 +196,280 @@ static void recoveredUpper() {
     require(updates.size()==1 && updates[0].screens[0]==contents.left(topSize) && updates[0].screens[1].isEmpty(),
             "FEC failed to deliver upper while the lower tail was still missing");
 }
+static void restartRows() {
+    Assembler assembler;
+    assembler.rowReuse = true;
+    const Screens original{row_fixture::compact(400), row_fixture::compact(320)};
+    const Screens edited{row_fixture::compact(400, 0), row_fixture::compact(320, 14)};
+    const quint32 base = UINT32_MAX;
+    const Screens deltas{row_fixture::delta(original[0], edited[0], base),
+                         row_fixture::delta(original[1], edited[1], base)};
+    require(!deltas[0].isEmpty() && !deltas[1].isEmpty(), "Could not create valid restart deltas");
+    QList<Pair> published;
+    QList<std::optional<quint32>> ack;
+    assembler.onPanels = [&](Pair pair) { published.append(std::move(pair)); };
+    assembler.onReference = [&](std::optional<quint32> seq) { ack.append(seq); };
+    qint64 now = 0;
+    auto feed = [&](quint32 seq, const Screens &screens, int skip = -1) {
+        const QByteArray packed = screens[0] + screens[1];
+        std::optional<Pair> result;
+        for (int off = 0; off < packed.size(); off += Chunk) {
+            if (off / Chunk == skip) continue;
+            auto header = message("R10P", {1, seq, 1234, quint32(screens[0].size()), quint32(screens[1].size()),
+                                           quint32(off / Chunk), 30});
+            result = assembler.feed(header + packed.mid(off, Chunk), ++now);
+        }
+        return result;
+    };
+    Screens keys{row_fixture::key(original[0]), row_fixture::key(original[1])};
+    require(!feed(base, keys, 0) && ack.isEmpty(), "ACKed a key before both screens arrived");
+    auto key = feed(base, keys);
+    // Completion can occur on a retried early fragment, before its duplicate tail.
+    require(ack.size() == 1 && ack.front() == base && assembler.counts.fullPairs == 1,
+            "Could not ACK a key completed by a retry");
+    const auto restored = feed(1, deltas); // Lost intervening frame 0, crossed a sequence wrap.
+    require(restored && restored->screens == edited, "Reconstructed screens differ from original JPEG bytes");
+    require(published.back().deltaBytes[0] == deltas[0].size() && published.back().reusedRows[1] == 14,
+            "Reconstruction lost wire size or reused-row diagnostics");
+    auto unknown = deltas;
+    qToLittleEndian(quint32(0), unknown[0].data() + 8);
+    qToLittleEndian(quint32(0), unknown[1].data() + 8);
+    const auto good = published.size();
+    require(!feed(2, unknown) && published.size() == good && ack.size() == 2 && !ack.back() &&
+            !assembler.acknowledgedReference() && assembler.rowReferenceMisses == 2,
+            "Delta with unavailable key escaped or failed to request a new key");
+    auto broken = keys;
+    broken[0].chop(2);
+    require(!feed(3, broken) && ack.size() == 2 && assembler.rowInvalid == 1,
+            "Incomplete JPEG key became a reference");
+    key = feed(4, keys);
+    require(key && key->screens == original && assembler.acknowledgedReference() == 4,
+            "Failed to recover on the next intact key");
+    const auto initialAcks = ack.size();
+    const auto initialPairs = assembler.counts.fullPairs;
+    const auto top = quint32(keys[0].size()), bottom = quint32(keys[1].size());
+    auto retry = [&](const char *tag, quint32 session, quint32 stamp, quint32 topBytes) {
+        return assembler.feed(message(tag, {session, 4, stamp, topBytes, bottom, 0, 30}) + keys[0].left(Chunk), ++now);
+    };
+    now += 30000;
+    retry("R10P", 2, 1234, top);
+    retry("R10P", 1, 1235, top);
+    retry("R10F", 1, 1234, top + 1);
+    require(ack.size() == initialAcks, "Key with mismatched session, timestamp or lengths was ACKed");
+    require(!retry("R10P", 1, 1234, top) && !retry("R10F", 1, 1234, top) &&
+            ack.size() == initialAcks + 1 && ack.back() == 4,
+            "Duplicate fragments did not yield one throttled key ACK");
+    now += 30000;
+    require(!retry("R10F", 1, 1234, top) && assembler.rowRepeatAcks == 2 &&
+            ack.size() == initialAcks + 2 && assembler.counts.fullPairs == initialPairs,
+            "Parity-only retry lost its key ACK or published a duplicate frame");
+    assembler.reset();
+    require(!assembler.rowReuse && !assembler.acknowledgedReference(), "Reset retained the old peer's reference");
+    require(!feed(1, deltas), "Accepted deltas after session reset");
+    assembler.reset();
+    assembler.rowReuse = true;
+    const quint32 ref = 5;
+    Screens longBase = original;
+    QByteArray bytes(35000, Qt::Uninitialized);
+    QRandomGenerator random(813);
+    for (auto &v : bytes) v = char(random.bounded(1, 255)); // No embedded restart markers.
+    longBase[1].insert(longBase[1].size() - 4, bytes);
+    Screens changed = longBase;
+    changed[1][changed[1].size() - 500] ^= 0x40;
+    if (uchar(changed[1][changed[1].size() - 500]) == 0xff) changed[1][changed[1].size() - 500] = 1;
+    require(bool(feed(ref, {row_fixture::key(longBase[0]), row_fixture::key(longBase[1])})), "Could not establish compression reference");
+    const auto inner = row_fixture::delta(longBase[1], changed[1], ref);
+    const auto envelope = row_fixture::dictionary(longBase[1], inner, ref);
+    QByteArray independent(inner.size(), Qt::Uninitialized);
+    require(LZ4_decompress_safe(envelope.constData() + 20, independent.data(), int(envelope.size()) - 20,
+                                int(independent.size())) != inner.size() || independent != inner,
+            "R20 test fixture did not actually reference the dictionary");
+    quint32 seq = ref + 1;
+    auto reject = [&](const QByteArray &bad) {
+        auto before = assembler.counts.fullPairs;
+        require(!feed(seq++, {edited[0], bad}) && assembler.counts.fullPairs == before,
+                "Invalid wrapped bottom reached the complete-pair path");
+    };
+    reject(envelope); // old session without R20 capability
+    assembler.dictionarySupported = true;
+    auto wrapped = feed(seq++, {changed[0], envelope});
+    require(wrapped && wrapped->screens == changed && published.back().dictionaryWireBytes == envelope.size() &&
+            published.back().deltaBytes[1] == inner.size() && assembler.dictionaryDecoded == 1,
+            "R20 lossless dictionary round trip or physical size accounting failed");
+    for (const int at : {4, 5, 6, 16}) {
+        auto bad = envelope;
+        bad[at] = char(uchar(bad[at]) + 1);
+        reject(bad);
+    }
+    for (quint32 length : {quint32(0), quint32(inner.size()+1), quint32(128001), UINT32_MAX}) {
+        auto bad = envelope;
+        qToLittleEndian(length, bad.data() + 12);
+        reject(bad);
+    }
+    reject(envelope.left(20));
+    reject(envelope.chopped(2));
+    for (int at : {0, 4, 5, 6, 8, 15, 16}) {
+        auto bad = inner;
+        bad[at] = char(uchar(bad[at]) + 1);
+        reject(row_fixture::dictionary(longBase[1], bad, ref));
+    }
+    require(!feed(seq++, {envelope, edited[1]}), "Accepted a dictionary on the upper screen");
+    auto beforeLegacy = published.size();
+    assembler.feed(message("R3LP", {1,seq++,1234,1,quint32(envelope.size()),0,30}) + envelope, ++now);
+    require(published.size() == beforeLegacy, "Legacy panel path published an R20 dictionary block");
+    auto unknownBase = envelope;
+    qToLittleEndian(ref - 1, unknownBase.data() + 8);
+    reject(unknownBase);
+    require(assembler.dictionaryDecoded == 1 && !assembler.acknowledgedReference(),
+            "Failed decode counted as a frame or an unavailable reference was retained");
+    assembler.reset();
+    require(!assembler.dictionarySupported && !assembler.dictionaryDecoded, "R20 state leaked between sessions");
+}
+static void alignedDeliveryWindow() {
+    DeliveryWindow delivery;
+    constexpr quint32 epoch = UINT32_MAX - 1500, bytes = UINT32_MAX - 123456, frames = UINT32_MAX - 32;
+    constexpr qint64 start = 90000000;
+    auto status = [&](quint32 ms, int cap = 2000000) {
+        delivery.status({epoch + ms, frames + 30 * ms / 1000, 30, cap, start + ms * 1000,
+                         1000000 + ms * 800, 200 + 20 * ms / 1000, 220 + 25 * ms / 1000});
+    };
+    auto telemetry = [&](quint32 ms, int delay = 0) {
+        delivery.wire(epoch + ms, bytes + ms * 1000, start + ms * 1000 + delay);
+    };
+    telemetry(0, -10000);
+    status(0);
+    status(1000); // the middle R17T is lost
+    status(3000);
+    require(delivery.report(start+3010000).isEmpty(), "Unmatched newest status produced comparable rates");
+    telemetry(3000, 20000);
+    delivery.wire(epoch + 3000, 1, start + 3050000); // duplicate must not rewrite an endpoint
+    auto window = delivery.report(start+3050000);
+    require(window["seconds"] == 3. && window["start_us"].toInteger() == start &&
+            window["end_us"].toInteger() == start + 3000000 && window["device_sent_pairs"].toInt() == 90 &&
+            window["received_pairs"].toInt() == 60 && window["received_tops"].toInt() == 75 &&
+            window["device_sent_fps"] == 30. && window["top_fps"] == 25. && window["pair_fps"] == 20. &&
+            window["device_MBps"] == 1. && window["received_MBps"] == .8,
+            "Different report boundaries or counter rollover corrupted aligned rates");
+    require(delivery.report(start+4600000).isEmpty(), "Expired aligned window survived");
+    telemetry(4100, -10000);
+    status(4100, 800000);
+    require(delivery.report(start+4150000).isEmpty(), "Combined two different rate caps");
+    status(6200, 800000);
+    telemetry(6200);
+    window = delivery.report(start+6200000);
+    require(window["device_cap"] == 800000 && window["start_us"].toInteger() == start+4100000,
+            "First reordered sample of the new gear was not preserved");
+}
+static void selectiveRepair() {
+    Assembler a;
+    QByteArray top(14 * Chunk + 23, 'T'), bottom(6 * Chunk + 17, 'B');
+    const auto jpeg = top + bottom;
+    const int n = (jpeg.size() + Chunk - 1) / Chunk;
+    std::array<QByteArray,4> parity;
+    parity.fill(QByteArray(Chunk, 0));
+    auto piece = [&](int index) { return jpeg.mid(index * Chunk, Chunk); };
+    for (int i = 0; i < n; ++i) {
+        const auto data = piece(i);
+        for (int j = 0; j < data.size(); ++j) parity[i % 4][j] ^= data[j];
+    }
+    auto feed = [&](const char *tag, quint32 seq, int i, qint64 when, quint32 session = 42, quint32 stampDelta = 0) {
+        a.feed(message(tag,{session,seq,seq*33333u+stampDelta,quint32(top.size()),quint32(bottom.size()),
+                            quint32(i),30}) + (QByteArrayView(tag) == "R10F" ? parity[i] : piece(i)), when);
+    };
+    QList<quint32> completed, tops;
+    a.onComplete = [&](const Pair &pair) {
+        require(pair.screens == Screens{top,bottom}, "Repair produced incorrect panel bytes");
+        completed.append(pair.seq);
+    };
+    a.onPanels = [&](Pair pair) {
+        if (!pair.screens[0].isEmpty()) tops.append(pair.seq);
+    };
+    QByteArray requested;
+    a.onRepair = [&](quint32 seq, quint32 pts, const QByteArray &indices) {
+        require(pts == seq*33333u, "Repair request lost the original capture timestamp");
+        requested = indices;
+        return true;
+    };
+    auto burst = [&](quint32 seq, qint64 now) {
+        for (int i = 0; i < n; ++i) if (i < 3 || i > 11) feed("R10P",seq,i,now);
+        for (int i = 0; i < 4; ++i) feed("R10F",seq,i,now+1000);
+        a.pollRepairs(now+1001);
+    };
+    auto intact = [&](quint32 seq, qint64 now) {
+        for (int i = 0; i < n; ++i) feed("R10P",seq,i,now);
+    };
+    burst(1,1000);
+    require(requested.isEmpty(), "Legacy sender received a repair request");
+    intact(2,34000);
+    a.repairLimit = 16;
+    intact(3,67000);
+    require(completed == QList<quint32>{2,3} && a.repairRequests == 0, "Healthy stream unexpectedly delayed");
+    burst(4,100000);
+    require(requested == QByteArray::fromHex("0304050607") && a.repairRequests == 1,
+            "Nine consecutive holes should require only five retransmissions with four parity stripes");
+    a.pollRepairs(105000);
+    feed("R19P",4,3,106000,41);
+    feed("R19P",4,3,106000,42,1);
+    feed("R19P",4,8,106000);
+    feed("R19P",5,3,106000);
+    require(a.repairFragments == 0 && a.repairRequests == 1, "Accepted unsolicited or mismatched repairs");
+    intact(5,120000);
+    require(completed.back() == 3 && tops.back() == 3, "Newer frame overtook a pending repair");
+    // The measured median request-to-reply time on the console is 37.4 ms.
+    for (char i : requested) feed("R19P",4,uchar(i),138500);
+    feed("R19P",4,3,138501);
+    require(completed == QList<quint32>{2,3,4,5} && tops == completed && a.repairFragments == 5 &&
+            a.repairedPairs == 1 && a.repairedTops == 1, "Did not deliver repaired and deferred originals in order");
+    burst(6,160000);
+    intact(7,186000);
+    a.pollRepairs(201000);
+    require(completed.back() == 7 && tops.back() == 7 && a.repairRequests == 2,
+            "Failed repair stalled a later complete frame");
+    for (char i : requested) feed("R19P",6,uchar(i),202000);
+    require(!completed.contains(6) && a.repairedPairs == 1 && a.repairFragments == 5,
+            "Expired frame came back after a newer one");
+    a.reset();
+    require(!a.repairLimit && !a.repairRequests, "Repair permission leaked across session reset");
+    a.repairLimit = 2;
+    // A long pause midway through an ordered train does not prove loss of its suffix.
+    for (int i = 0; i < 7; ++i) feed("R10P",8,i,220000);
+    a.pollRepairs(258000);
+    require(!a.repairRequests, "Ordered data pause requested the unsent suffix");
+    // Only evidenced upper-screen holes fit. The lower screen may still be on its way.
+    for (int i = 9; i <= 14; ++i) feed("R10P",8,i,259000);
+    a.pollRepairs(270000);
+    require(requested == QByteArray::fromHex("0708"), "Early repair did not select only bracketed upper-screen holes");
+    intact(9,271000);
+    for (char i : requested) feed("R19P",8,uchar(i),272000);
+    require(tops.mid(tops.size()-2) == QList<quint32>{8,9} && completed.back() == 9 &&
+            !completed.contains(8) && a.repairedTops == 1 && a.repairedPairs == 0,
+            "Panel-only recovery held its successor after all requested packets arrived");
+    a.repairLimit = 16;
+    burst(10,310000);
+    // No newer complete pair can be shown. A 55ms response is still useful.
+    for (char i : requested) feed("R19P",10,uchar(i),366000);
+    require(completed.back() == 10 && a.repairedPairs == 1, "Useful 55 ms response expired at the successor hold deadline");
+    burst(11,410000);
+    feed("R19P",11,uchar(requested[0]),476002);
+    require(completed.back() == 10 && a.expiredRepairs == 1, "Stale retransmission extended the repair deadline");
+    // With a delayed frame tail the 90 ms absolute cap wins even when the request itself is recent.
+    for (int i = 0; i < n; ++i) if (i < 3 || i > 11) feed("R10P",12,i,510000);
+    for (int i = 0; i < 4; ++i) feed("R10F",12,i,557000);
+    a.pollRepairs(557001);
+    feed("R19P",12,uchar(requested[0]),600001);
+    require(a.expiredRepairs == 2 && !completed.contains(12), "Accepted repairs older than the playout budget");
+    a.reset();
+    a.repairLimit = 16;
+    for (int i = 0; i < n-2; ++i) feed("R10P",13,i,710000);
+    a.pollRepairs(724000);
+    require(!a.repairRequests, "A brief pause was mistaken for a missing end of frame");
+    a.pollRepairs(745000);
+    QByteArray tail;
+    tail.append(char(n-2)).append(char(n-1));
+    require(requested == tail && a.repairRequests == 1, "A lost final short tail could not recover on a quiet stream");
+    for (char i : requested) feed("R19P",13,uchar(i),761000);
+    require(completed.back() == 13, "Short-tail recovery failed");
+}
 int main() {
     QByteArray source(3500, Qt::Uninitialized);
     for (int i = 0; i < source.size(); ++i)
@@ -227,5 +508,8 @@ int main() {
     recoveredUpper();
     lowRateRecovery();
     senderLimitedRecovery();
+    restartRows();
+    alignedDeliveryWindow();
+    selectiveRepair();
     return 0;
 }

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-/* About 75 KB/s at the DSP's native cadence, including previous-batch
+/* About 75 KB/s at the DSP's native cadence, including one batch of
  * redundancy and IPv4/UDP headers. Reserve 100 KB/s from the *total* cap;
  * the shared packet pacer remains authoritative even under capture jitter. */
 #define LIVE_AUDIO_RESERVE_BYTES 100000u
@@ -12,6 +12,32 @@
 #define LIVE_AUDIO_BATCH_BLOCKS 3u
 #define LIVE_AUDIO_BATCH_WAIT_US 12000u
 #define LIVE_AUDIO_MAX_AGE_US 80000u
+
+/* One redundant batch two datagrams after its original. Keep the first
+ * transmissions immediate, including startup and after a peer change. */
+typedef struct {
+    uint8_t records[LIVE_AUDIO_BATCH_BLOCKS*LIVE_AUDIO_RECORD_BYTES];
+    uint64_t first_capture;
+    unsigned count;
+} LiveAudioBatch;
+typedef struct { LiveAudioBatch batches[2]; unsigned next; } LiveAudioHistory;
+
+static inline void live_audio_history_reset(LiveAudioHistory *h) {
+    h->batches[0].count=h->batches[1].count=h->next=0;
+}
+static inline const LiveAudioBatch *live_audio_history_repeat(const LiveAudioHistory *h,
+                                                             uint64_t now,uint64_t max_age) {
+    const LiveAudioBatch *batch=&h->batches[h->next];
+    if(!batch->count||now<batch->first_capture||now-batch->first_capture>max_age)return NULL;
+    return batch;
+}
+static inline void live_audio_history_store(LiveAudioHistory *h,const uint8_t *fresh,
+                                            unsigned count,uint64_t first_capture) {
+    LiveAudioBatch *batch=&h->batches[h->next];
+    memcpy(batch->records,fresh,count*LIVE_AUDIO_RECORD_BYTES);
+    batch->count=count;batch->first_capture=first_capture;
+    h->next^=1u;
+}
 
 typedef struct {
     uint64_t queued_tick;

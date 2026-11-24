@@ -1,5 +1,7 @@
 #include "viewer_native.h"
 #include "debug_window.h"
+#include "stream_presets.h"
+#include "live_fps.h"
 #include <QtWidgets>
 #include <algorithm>
 #include <utility>
@@ -127,15 +129,22 @@ class Viewer final : public QWidget {
     QWidget *panel;
     QHBoxLayout *mainBar;
     QLabel *status, *elapsed, *quality;
-    QToolButton *quickFps = nullptr, *quickRate = nullptr, *generation = nullptr, *performance = nullptr;
+    QToolButton *quickFps = nullptr, *quickRate = nullptr, *quickJpeg = nullptr, *generation = nullptr, *performance = nullptr;
     QLabel *performanceCard = nullptr;
     QToolButton *restore = nullptr, *more = nullptr;
     RecordButton *record;
-    QMenu *menu, *limitsMenu = nullptr;
+    QMenu *menu;
+    QAction *jpegMenuStatus = nullptr;
+    QAction *rateStatus = nullptr;
+    QActionGroup *rateModes = nullptr;
+    QLabel *jpegSettingsStatus = nullptr;
+    QLabel *fpsFallback = nullptr;
+    int targetFps = 0, targetJpeg = 0, targetRate = 0;
+    bool targetAdaptive = true;
     QAction *recordAction, *mute = nullptr, *openFile, *openFolder;
     QDialog *settings;
     QTabWidget *settingsTabs;
-    QComboBox *fps, *rate, *motion, *scale, *rifePrecision = nullptr;
+    QComboBox *fps, *rate, *rateMode, *jpegQuality, *motion, *scale, *rifePrecision = nullptr;
     QLineEdit *ip, *rtsp;
     QSpinBox *port;
     struct EffectChoice {
@@ -155,6 +164,24 @@ class Viewer final : public QWidget {
     QJsonObject snapshot;
     QJsonArray history, queue;
     QString lastFile;
+    QString jpegStatus() const {
+        const int target = snapshot.value("requested_jpeg_quality").toInt();
+        if (target == 70 && !snapshot.value("jpeg_q70_supported").toBool()) {
+            QString note = "已选 Q70，等待掌机报告 Q70 支持";
+            if (snapshot.value("connection") == "live" && snapshot.contains("device_jpeg_quality")) {
+                const int actual = snapshot.value("device_jpeg_quality").toInt();
+                note += actual ? QString("，掌机当前目标 Q%1").arg(actual) : QStringLiteral("，掌机当前为自动画质");
+            }
+            return note;
+        }
+        if (target == 0 || snapshot.value("connection").toString() != "live")
+            return {};
+        if (snapshot.value("jpeg_quality_confirmed").toBool())
+            return QString("掌机已采用 Q%1 目标").arg(target);
+        if (snapshot.contains("device_jpeg_quality"))
+            return QString("Q%1 目标等待掌机确认").arg(target);
+        return QString("Q%1 目标未确认，需支持此档位的掌机端").arg(target);
+    }
     QToolButton *quickControl(QHBoxLayout *bar, const QString &key, const QString &title) {
         auto *button = new QToolButton(panel);
         button->setObjectName("quick" + key);
@@ -168,7 +195,9 @@ class Viewer final : public QWidget {
     }
     void fillQuick(QToolButton *button, QComboBox *combo, const QString &field) {
         auto *choices = button->menu();
-        choices->clear();
+        // Keep the rate policy actions while rebuilding device-supported numeric choices.
+        for (auto *a : choices->actions())
+            if (a->data().isValid()) delete a;
         for (int i = 0; i < combo->count(); ++i) {
             auto *a = choices->addAction(combo->itemText(i));
             a->setData(combo->itemData(i));
@@ -178,11 +207,93 @@ class Viewer final : public QWidget {
             });
         }
     }
-    void selectQuick(QToolButton *button, const QString &text, int value) {
+    void selectQuick(QToolButton *button, const QString &label, const QString &text, int value) {
         button->setText(text);
-        button->menu()->setTitle((button == quickFps ? QStringLiteral("目标帧率　") : QStringLiteral("码率上限　")) + text);
+        button->menu()->setTitle(label + QStringLiteral("　") + text);
         for (auto *a : button->menu()->actions())
-            a->setChecked(a->data().toInt() == value);
+            if (a->data().isValid()) a->setChecked(a->data().toInt() == value);
+    }
+    void selectJpeg(int target) {
+        targetJpeg = target;
+        jpegQuality->setCurrentIndex(jpegQuality->findData(target));
+        updateJpegLabel();
+    }
+    void updateJpegLabel() {
+        QString label = targetJpeg ? QString("Q%1").arg(targetJpeg) : QStringLiteral("自动Q");
+        const bool current = snapshot.value("connection") == "live" &&
+                             snapshot.value("requested_jpeg_quality").toInt() == targetJpeg;
+        if (targetJpeg == 70 && !(current && snapshot.value("jpeg_quality_confirmed").toBool()))
+            label += QStringLiteral(" 待确认");
+        selectQuick(quickJpeg, "掌机 JPEG 画质", label, targetJpeg);
+        const auto note = current ? jpegStatus() : QString();
+        quickJpeg->setToolTip(note.isEmpty() ? QStringLiteral("修改掌机 JPEG 画质") : note);
+    }
+    void updateFpsLabel() {
+        if (targetFps <= 0) return;
+        const auto effective = snapshot.value("effective_fps").toInt();
+        const bool fallback = snapshot.value("connection") == "live" &&
+            snapshot.value("requested_fps").toInt() == targetFps && effective > 0 && effective != targetFps &&
+            !(snapshot.value("fps_mask").toInt() & live_fps_flag(targetFps));
+        const QString value = fallback ? QString("%1→%2 FPS").arg(targetFps).arg(effective) : QString("%1 FPS").arg(targetFps);
+        const QString note = fallback ? QString("掌机不支持目标 %1 FPS，当前向掌机请求 %2 FPS。").arg(targetFps).arg(effective) : QString();
+        selectQuick(quickFps, "目标帧率", value, targetFps);
+        quickFps->setToolTip(fallback ? note : QStringLiteral("修改掌机目标帧率"));
+        fpsFallback->setText(note);
+        fpsFallback->setVisible(fallback);
+    }
+    static void showRequestedLimit(QComboBox *combo, int value, const QString &label) {
+        auto *model = static_cast<QStandardItemModel *>(combo->model());
+        // A previous request can exceed a newly connected device's capabilities.
+        // Preserve it when edits to other settings are applied.
+        const int last = combo->count() - 1;
+        if (last >= 0 && !model->item(last)->isEnabled() && combo->itemData(last).toInt() != value)
+            combo->removeItem(last);
+        int index = combo->findData(value);
+        if (index < 0) {
+            combo->addItem(label + QStringLiteral("（当前掌机不支持）"), value);
+            index = combo->count() - 1;
+            model->item(index)->setEnabled(false);
+        }
+        combo->setCurrentIndex(index);
+    }
+    void addStreamPresets(QMenu *choices, bool applyNow) {
+        auto *group = new QActionGroup(choices);
+        for (const auto preset : live::streamPresets) {
+            const QString label = QString("%1 · %2 FPS · Q%3 · %4 MB/s")
+                .arg(QString::fromUtf8(preset.name)).arg(preset.fps).arg(preset.jpegQuality)
+                .arg(preset.rate / 1e6, 0, 'g', 2);
+            auto *action = choices->addAction(label);
+            action->setData(preset.id);
+            action->setCheckable(true);
+            group->addAction(action);
+            const auto available = [this, preset] {
+                auto supported = [](QComboBox *combo, int value) {
+                    const int index = combo->findData(value);
+                    return index >= 0 && combo->model()->flags(combo->model()->index(index,0)).testFlag(Qt::ItemIsEnabled);
+                };
+                return supported(fps, preset.fps) && supported(rate, preset.rate);
+            };
+            connect(choices, &QMenu::aboutToShow, this, [this, action, preset, applyNow, available] {
+                action->setEnabled(available());
+                const bool matches = applyNow
+                    ? targetFps == preset.fps && targetJpeg == preset.jpegQuality && targetRate == preset.rate && !targetAdaptive
+                    : fps->currentData().toInt() == preset.fps && jpegQuality->currentData().toInt() == preset.jpegQuality &&
+                      rate->currentData().toInt() == preset.rate && !rateMode->currentData().toBool();
+                action->setChecked(matches);
+            });
+            connect(action, &QAction::triggered, this, [this, preset, applyNow, available] {
+                if (!available()) return;
+                if (applyNow) {
+                    queue.append(QJsonObject{{"type","limit"}, {"fps",preset.fps}, {"jpegQuality",preset.jpegQuality},
+                                             {"rate",preset.rate}, {"adaptiveRate",false}});
+                    return;
+                }
+                fps->setCurrentIndex(fps->findData(preset.fps));
+                rate->setCurrentIndex(rate->findData(preset.rate));
+                jpegQuality->setCurrentIndex(jpegQuality->findData(preset.jpegQuality));
+                rateMode->setCurrentIndex(rateMode->findData(false));
+            });
+        }
     }
     void generationLabel(const QString &method) {
         QString text = method == "flow" ? "补帧 DIS" : method == "rife" ? "补帧 RIFE" : "补帧 关";
@@ -190,17 +301,17 @@ class Viewer final : public QWidget {
         generation->setAccessibleName(generation->text());
         generation->setToolTip(text + QStringLiteral(" · F 切换运动补帧"));
     }
+    QString number(const QString &key, int decimals = 0, double divisor = 1.) const {
+        if (snapshot.contains("rx_sample_us") &&
+            (key == "device_sent_fps" || key == "device_cap" || key.startsWith("captured_")) &&
+            snapshot.value("wall_us").toInteger() - snapshot.value("device_status_us").toInteger() >= 2500000)
+            return QStringLiteral("—");
+        const auto v = snapshot.value(key);
+        return v.isDouble() ? QString::number(v.toDouble() / divisor, 'f', decimals) : QStringLiteral("—");
+    }
     void refreshCard(bool showHint = true) {
         if (!performanceCard || performanceCard->isHidden())
             return;
-        auto number = [this](QString key, int decimals = 0, double divisor = 1.) {
-            if (snapshot.contains("rx_sample_us") &&
-                (key == "device_sent_fps" || key == "device_cap" || key.startsWith("captured_")) &&
-                snapshot.value("wall_us").toInteger() - snapshot.value("device_status_us").toInteger() >= 2500000)
-                return QStringLiteral("—");
-            const auto v = snapshot.value(key);
-            return v.isDouble() ? QString::number(v.toDouble() / divisor, 'f', decimals) : QStringLiteral("—");
-        };
         const auto method = snapshot["motion"].toString();
         const QString motionName = method == "flow" ? "DIS 光流" : method == "rife" ? "RIFE AI" : "关闭";
         QStringList rows{"直播性能   " + snapshot["time"].toString()};
@@ -216,13 +327,17 @@ class Viewer final : public QWidget {
                         .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1))
                  << QString("运动补帧 %1   ·   缓冲 %2 ms").arg(motionName, number("playout_delay_ms"))
                  << QString("掌机发送 %1   ·   双屏收齐 %2 FPS").arg(number("device_sent_fps", 1), number("fps_received", 1))
-                 << QString("设置上限 %1   ·   掌机当前上限 %2 MB/s")
-                        .arg(number("requested_rate", 2, 1e6), number("device_cap", 2, 1e6))
-                 << QString("视频预算 %1   ·   实际接收 %2 MB/s")
-                        .arg(number("device_budget", 2, 1e6), number("bytes_per_s", 2, 1e6))
+                 << QString("%1 %2   ·   掌机当前上限 %3 MB/s")
+                        .arg(snapshot.value("adaptive_rate").toBool(true) ? "自适应上限" : "固定上限",
+                             number("requested_rate", 2, 1e6), number("device_cap", 2, 1e6))
+                 << QString("掌机提交 %1   ·   PC 实收 %2 MB/s")
+                        .arg(number("device_media_bytes_per_s", 2, 1e6), number("bytes_per_s", 2, 1e6))
                  << QString("上 / 下屏 JPEG Q  %1 / %2").arg(number("jpeg_top_q"), number("jpeg_bottom_q"))
                  << QString("%1   ·   %2   ·   %3 ms").arg(quality->text(), snapshot["backend"].toString(), number("processing_ms", 1))
                  << QString("本秒最长源帧间隔  %1 ms").arg(number("source_interval_max_gap_ms", 1));
+            const auto jpeg = jpegStatus();
+            if (!jpeg.isEmpty())
+                rows << jpeg;
             if (snapshot.contains("jpeg_header_saving_pct"))
                 rows << QString("JPEG 表头精简累计省 %1 MB（%2%）")
                             .arg(number("jpeg_header_saved_bytes", 1, 1000000.), number("jpeg_header_saving_pct", 1));
@@ -286,8 +401,8 @@ class Viewer final : public QWidget {
         };
         fit(generation);
         fit(quickFps);
+        fit(quickJpeg);
         fit(quickRate);
-        if (limitsMenu) limitsMenu->menuAction()->setVisible(panel->isHidden() || quickFps->isHidden() || quickRate->isHidden());
         if (quality->text().isEmpty()) quality->hide();
         else fit(quality);
     }
@@ -360,14 +475,15 @@ class Viewer final : public QWidget {
         debug->receive(snapshot, history);
         debug->raise();
     }
-    void openSettings() {
+    enum SettingsTab { StreamTab, PictureTab, ConnectionTab };
+    void openSettings(SettingsTab tab) {
+        settingsTabs->setCurrentIndex(tab);
         settings->show();
         settings->raise();
         settings->activateWindow();
     }
     void openEffectSettings() {
-        settingsTabs->setCurrentIndex(1);
-        openSettings();
+        openSettings(PictureTab);
     }
     void updatePrecisionControl() {
         const bool retryRife = effects.value("blocked_motion").toObject().contains("rife");
@@ -442,14 +558,20 @@ class Viewer final : public QWidget {
         settingsTabs = new QTabWidget(settings);
         settingsTabs->setObjectName("streamSettingsTabs");
         layout->addWidget(settingsTabs);
-        auto *connectionPage = new QWidget(settingsTabs);
+        auto *streamPage = new QWidget(settingsTabs);
         auto *picturePage = new QWidget(settingsTabs);
-        settingsTabs->addTab(connectionPage, "投屏连接");
-        settingsTabs->addTab(picturePage, "画面与补帧");
+        auto *connectionPage = new QWidget(settingsTabs);
+        settingsTabs->addTab(streamPage, "掌机推流");
+        settingsTabs->addTab(picturePage, "显示与补帧");
+        settingsTabs->addTab(connectionPage, "连接与输出");
+        auto *stream = new QFormLayout(streamPage);
         auto *connection = new QFormLayout(connectionPage);
         auto *picture = new QFormLayout(picturePage);
-        connection->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-        picture->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        for (auto *form : {stream, picture, connection}) {
+            form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+            form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            form->setVerticalSpacing(8);
+        }
         settings->setMinimumWidth(340);
         ip = new QLineEdit(o["ip"].toString(), settings);
         ip->setObjectName("senderIp");
@@ -462,8 +584,41 @@ class Viewer final : public QWidget {
         connection->addRow("监听端口", port);
         fps = new QComboBox(settings);
         rate = new QComboBox(settings);
-        connection->addRow("目标帧率", fps);
-        connection->addRow("目标码率上限", rate);
+        fps->setObjectName("sourceFps");
+        rate->setObjectName("sourceRate");
+        auto *presets = new QToolButton(streamPage);
+        presets->setObjectName("streamPresets");
+        presets->setText("选择固定上限组合…");
+        presets->setToolTip("填入掌机目标帧率、双屏 JPEG 画质和固定带宽上限。可以逐项修改后再应用。");
+        presets->setPopupMode(QToolButton::InstantPopup);
+        presets->setMenu(new QMenu(presets));
+        addStreamPresets(presets->menu(), false);
+        stream->addRow("常用组合", presets);
+        stream->addRow("目标帧率", fps);
+        fpsFallback = new QLabel(streamPage);
+        fpsFallback->setWordWrap(true);
+        stream->addRow(fpsFallback);
+        fpsFallback->hide();
+        rateMode = new QComboBox(settings);
+        rateMode->setObjectName("rateMode");
+        rateMode->addItem("自适应上限", true);
+        rateMode->addItem("固定上限", false);
+        rateMode->setCurrentIndex(rateMode->findData(o.value("adaptiveRate").toBool(true)));
+        rateMode->setToolTip("自适应只根据收包情况调整带宽上限。固定模式持续使用所选上限，实际流量随画面而变。");
+        jpegQuality = new QComboBox(settings);
+        jpegQuality->setObjectName("jpegQuality");
+        jpegQuality->addItem("自动", 0);
+        for (int q : {40, 60, 70, 80})
+            jpegQuality->addItem(QString("Q%1").arg(q), q);
+        jpegQuality->setCurrentIndex(std::max(0, jpegQuality->findData(o["jpegQuality"].toInt())));
+        jpegQuality->setToolTip("控制掌机上下屏的 JPEG 编码。Q 越高，通常越清晰、每帧也越大。自动档按带宽预算选择质量。");
+        stream->addRow("JPEG 质量", jpegQuality);
+        jpegSettingsStatus = new QLabel(streamPage);
+        jpegSettingsStatus->setWordWrap(true);
+        stream->addRow(jpegSettingsStatus);
+        jpegSettingsStatus->hide();
+        stream->addRow("带宽上限", rate);
+        stream->addRow("带宽模式", rateMode);
         scale = new QComboBox(settings);
         scale->addItem("原生 1×", 1);
         scale->addItem("2×", 2);
@@ -517,6 +672,8 @@ class Viewer final : public QWidget {
             QJsonObject changes{{"type", "apply"},
                                      {"fps", fps->currentData().toInt()},
                                      {"rate", rate->currentData().toInt()},
+                                     {"adaptiveRate", rateMode->currentData().toBool()},
+                                     {"jpegQuality", jpegQuality->currentData().toInt()},
                                      {"ip", ip->text().trimmed()},
                                      {"port", port->value()},
                                      {"scale", scale->currentData().toInt()},
@@ -554,7 +711,8 @@ class Viewer final : public QWidget {
         quality->setObjectName("qualityStatus");
         bar->addWidget(quality);
         quickFps = quickControl(bar, "Fps", "修改掌机目标帧率");
-        quickRate = quickControl(bar, "Rate", "修改掌机码率上限 (MB/s)");
+        quickJpeg = quickControl(bar, "Jpeg", "修改掌机 JPEG 画质");
+        quickRate = quickControl(bar, "Rate", "修改掌机带宽上限 (MB/s)");
         generation = new QToolButton(panel);
         generation->setObjectName("frameGeneration");
         generation->setAutoRaise(true);
@@ -582,7 +740,7 @@ class Viewer final : public QWidget {
         copyShot->setShortcut(QKeySequence("Ctrl+Shift+C"));
         performance->setContextMenuPolicy(Qt::ActionsContextMenu);
         performance->addAction(copyShot);
-        effectSettings = new QAction("画面与补帧…", performance);
+        effectSettings = new QAction("显示与补帧…", performance);
         effectSettings->setObjectName("effectSettings");
         effectSettings->setVisible(false);
         performance->addAction(effectSettings);
@@ -639,10 +797,53 @@ class Viewer final : public QWidget {
             return sub;
         };
         makeSettings(o);
+        auto *limitsMenu = submenu("掌机推流", "limitsMenu");
+        limitsMenu->addSection("固定上限组合");
+        addStreamPresets(limitsMenu, true);
+        limitsMenu->addSeparator();
+        auto *editStream = action(limitsMenu, "自定义参数…", {}, [this] { openSettings(StreamTab); });
+        editStream->setObjectName("editStreamSettings");
+        menu->addSeparator();
+        auto *bandwidth = quickRate->menu();
+        bandwidth->setToolTipsVisible(true);
+        rateStatus = bandwidth->addAction(QString());
+        rateStatus->setEnabled(false);
+        rateStatus->setVisible(false);
+        rateModes = new QActionGroup(bandwidth);
+        for (int i = 0; i < rateMode->count(); ++i) {
+            const bool adaptive = rateMode->itemData(i).toBool();
+            auto *choice = bandwidth->addAction(rateMode->itemText(i));
+            choice->setCheckable(true);
+            choice->setToolTip(rateMode->toolTip());
+            rateModes->addAction(choice);
+            choice->setChecked(i == rateMode->currentIndex());
+            connect(choice, &QAction::triggered, this, [this, adaptive] {
+                queue.append(QJsonObject{{"type", "limit"}, {"adaptiveRate", adaptive}});
+            });
+        }
+        bandwidth->addSeparator();
+        auto *jpegMenu = quickJpeg->menu();
+        jpegMenu->setObjectName("jpegQualityMenu");
+        jpegMenu->setToolTipsVisible(true);
+        auto *jpegGroup = new QActionGroup(jpegMenu);
+        for (int i = 0; i < jpegQuality->count(); ++i) {
+            const int target = jpegQuality->itemData(i).toInt();
+            auto *a = action(jpegMenu, jpegQuality->itemText(i), {}, [this, target] {
+                queue.append(QJsonObject{{"type", "limit"}, {"jpegQuality", target}});
+            });
+            a->setData(target);
+            a->setCheckable(true);
+            a->setToolTip(jpegQuality->toolTip());
+            jpegGroup->addAction(a);
+        }
+        selectJpeg(jpegQuality->currentData().toInt());
+        jpegMenuStatus = jpegMenu->addAction(QString());
+        jpegMenuStatus->setEnabled(false);
+        jpegMenuStatus->setVisible(false);
         updatePictureScale(o["mode"].toString(), o["scale"].toInt(1));
         const auto modes = o["modes"].toObject();
         if (!modes.isEmpty()) {
-            auto *pictureMenu = submenu("画质", "pictureMenu");
+            auto *pictureMenu = submenu("PC 画质增强", "pictureMenu");
             pictureMenu->setToolTipsVisible(true);
             auto *group = new QActionGroup(pictureMenu);
             for (auto id : {"off", "fast-detail", "fbcnn", "fbcnn-detail", "span", "fbcnn-sr", "clean", "gpu", "sr"}) {
@@ -669,7 +870,7 @@ class Viewer final : public QWidget {
             action(pictureMenu, "开关画质增强", Qt::Key_E, [this] { emitAction("enhance"); });
         }
         if (o["motion"].toBool()) {
-            auto *motionMenu = submenu("补帧", "motionMenu");
+            auto *motionMenu = submenu("运动补帧", "motionMenu");
             motionMenu->setToolTipsVisible(true);
             auto *group = new QActionGroup(motionMenu);
             for (int i = 0; i < motion->count(); ++i) {
@@ -685,11 +886,8 @@ class Viewer final : public QWidget {
             }
             motionMenu->addSeparator();
             action(motionMenu, "开关补帧", Qt::Key_F, [this] { emitAction("motion"); });
-            action(motionMenu, "补帧设置…", {}, [this] { openEffectSettings(); });
+            action(motionMenu, "显示与补帧设置…", {}, [this] { openEffectSettings(); });
         }
-        limitsMenu = submenu("帧率与码率", "limitsMenu");
-        limitsMenu->addMenu(quickFps->menu());
-        limitsMenu->addMenu(quickRate->menu());
         menu->addSeparator();
         auto *viewing = submenu("观看", "viewingMenu");
         if (o["mute"].toBool())
@@ -711,7 +909,7 @@ class Viewer final : public QWidget {
         openFile->setEnabled(false);
         openFolder->setEnabled(false);
         menu->addSeparator();
-        action(menu, "投屏设置…", QKeySequence("Ctrl+,"), [this] { openSettings(); });
+        action(menu, "连接与输出…", QKeySequence("Ctrl+,"), [this] { openSettings(ConnectionTab); });
         auto *diagnostics = submenu("性能诊断", "diagnosticsMenu");
         action(diagnostics, "性能详情", Qt::Key_F12, [this] { showDebug(); });
         diagnostics->addAction(copyShot);
@@ -795,12 +993,23 @@ class Viewer final : public QWidget {
             fillQuick(quickRate, rate, "rate");
         }
         if (v.contains("fps")) {
-            fps->setCurrentIndex(std::max(0, fps->findData(v["fps"].toInt())));
-            selectQuick(quickFps, QString("%1 FPS").arg(v["fps"].toInt()), v["fps"].toInt());
+            targetFps = v["fps"].toInt();
+            showRequestedLimit(fps, targetFps, QString("%1 FPS").arg(targetFps));
+            updateFpsLabel();
         }
+        if (v.contains("jpegQuality"))
+            selectJpeg(v["jpegQuality"].toInt());
         if (v.contains("rate")) {
-            rate->setCurrentIndex(std::max(0, rate->findData(v["rate"].toInt())));
-            selectQuick(quickRate, QString("%1 MB/s").arg(QString::number(v["rate"].toDouble()/1e6)), v["rate"].toInt());
+            targetRate = v["rate"].toInt();
+            const auto label = QString("%1 MB/s").arg(targetRate / 1e6);
+            showRequestedLimit(rate, targetRate, label);
+            selectQuick(quickRate, "带宽上限", label, targetRate);
+        }
+        if (v.contains("adaptiveRate")) {
+            targetAdaptive = v["adaptiveRate"].toBool();
+            const int index = rateMode->findData(targetAdaptive);
+            rateMode->setCurrentIndex(index);
+            rateModes->actions().at(index)->setChecked(true);
         }
         if (v.contains("motion")) {
             motion->setCurrentIndex(motion->findData(v["motion"].toString()));
@@ -825,6 +1034,18 @@ class Viewer final : public QWidget {
         }
         if (v.contains("debug")) {
             snapshot = v["debug"].toObject();
+            updateFpsLabel();
+            updateJpegLabel();
+            rateStatus->setText(QString("掌机上限 %1 · 实收 %2 MB/s")
+                                    .arg(number("device_cap", 2, 1e6), number("bytes_per_s", 2, 1e6)));
+            rateStatus->setVisible(snapshot.value("connection").toString() == "live");
+            const auto jpeg = jpegStatus();
+            jpegSettingsStatus->setText(jpeg);
+            jpegSettingsStatus->setVisible(!jpeg.isEmpty());
+            if (jpegMenuStatus) {
+                jpegMenuStatus->setText(jpeg);
+                jpegMenuStatus->setVisible(!jpeg.isEmpty());
+            }
             history = v["history"].toArray();
             if (performance) {
                 const auto health = snapshot.value("frame_health").toObject();

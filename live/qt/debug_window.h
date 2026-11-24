@@ -2,11 +2,13 @@
 #include <QtWidgets>
 #include <functional>
 namespace live {
+class DebugSamples;
 using DebugCapture = std::function<QJsonObject(bool)>;
 class DebugWindow final : public QDialog {
     DebugCapture capture;
     QCheckBox *freeze;
-    QTableWidget *samples;
+    QTabWidget *tabs;
+    DebugSamples *samples;
     QPlainTextEdit *raw;
     QPushButton *logs;
     QLabel *marker;

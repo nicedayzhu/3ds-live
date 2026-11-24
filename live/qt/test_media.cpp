@@ -115,6 +115,70 @@ class MediaTests : public QObject {
         // The speaker and recorder ask for differently sized windows; the fill is sample-aligned.
         QCOMPARE(timeline.pcm(origin + 10000, 960), pcm.mid(480 * 4, 960 * 4));
     }
+    void speakerCountsSubmittedSourceAndGaps() {
+        Timeline t(0);
+        t.reset(7);
+        constexpr qint64 origin = 1000000;
+        constexpr double quantum = 160e9 / 32728498.;
+        auto silentBlock = [&](int index, quint32 stamp) {
+            QByteArray packet(199, 0);
+            memcpy(packet.data(), "R9A1", 4);
+            qToLittleEndian<quint32>(7, packet.data() + 4);
+            qToLittleEndian<quint16>(1, packet.data() + 12);
+            qToLittleEndian<quint32>(32728498, packet.data() + 16);
+            qToLittleEndian<quint16>(160, packet.data() + 20);
+            qToLittleEndian<quint16>(2, packet.data() + 22);
+            qToLittleEndian<quint32>(index, packet.data() + 24);
+            qToLittleEndian(stamp, packet.data() + 28);
+            t.addAudio(packet, origin + stamp);
+        };
+        SpeakerBlock c;
+        silentBlock(1, 0);
+        silentBlock(9, quint32(qRound64(8 * quantum)));
+        const int firstEnd = qRound(quantum * .048);
+        const int lastStart = qRound(8 * quantum * .048);
+        const int end = qRound(9 * quantum * .048);
+        QCOMPARE(t.pcm(origin, end), QByteArray(end * 4, 0)); // Recorder does not commit a speaker write.
+        QCOMPARE(t.speakerStats()["submitted_samples"].toInt(), 0);
+        t.pcm(origin - 10000, 480, &c);
+        QCOMPARE(c.samples, 0);
+        for (int n = 0; n < end; n += 480) {
+            t.pcm(origin + n / 480 * 10000, std::min(480, end - n), &c);
+            t.speakerSubmitted(c, false);
+        }
+        auto report = t.speakerStats();
+        const int gap = lastStart - firstEnd;
+        QCOMPARE(report["submitted_samples"].toInt(), end);
+        QCOMPARE(report["source_samples"].toInt(), end - gap); // Real zero-valued PCM has source coverage.
+        QCOMPARE(report["missing_samples"].toInt(), gap);
+        QCOMPARE(report["concealed_samples"].toInt(), 2 * std::min(firstEnd, end - lastStart));
+        QCOMPARE(report["longest_missing_samples"].toInt(), gap);
+        t.pcm(origin + 50000, 480, &c);
+        t.speakerSubmitted(c, true);
+        QCOMPARE(t.speakerStats()["queue_drains"].toInt(), 1);
+        c.samples = 0; // Muted writes end this active segment.
+        t.speakerSubmitted(c, false);
+        t.pcm(origin + 60000, 480, &c);
+        t.speakerSubmitted(c, true);
+        QCOMPARE(t.speakerStats()["queue_drains"].toInt(), 1);
+        t.pcm(origin + 400000, 480, &c);
+        QCOMPARE(c.samples, 0);
+        t.pcm(origin + 60000, 480, &c);
+        t.setAudioEnabled(false);
+        t.speakerSubmitted(c, true); // A stale write cannot cross an audio clock or session change.
+        t.pcm(origin + 60000, 480, &c);
+        QCOMPARE(c.samples, 0);
+        t.setAudioEnabled(true);
+        t.pcm(origin + 60000, 480, &c);
+        QCOMPARE(c.samples, 0);
+        silentBlock(50, 300000);
+        t.pcm(origin + 300000, 480, &c);
+        QVERIFY(c.source > 0);
+        t.reset(8);
+        t.speakerSubmitted(c, true);
+        QCOMPARE(t.speakerStats()["submitted_samples"].toInt(), 0);
+        QCOMPARE(t.speakerStats()["queue_drains"].toInt(), 0);
+    }
     void restoredUpperWakesIdlePresentation() {
         Timeline t(160);
         t.setPictureMode("fbcnn");

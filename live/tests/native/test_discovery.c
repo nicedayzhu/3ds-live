@@ -37,6 +37,16 @@ int main(void) {
     make_ack(&discovery,session,probe);
     assert(live_discover_ack(&discovery,next_pc,session,probe,sizeof probe,46));
     assert(discovery.peer==next_pc);
+    /* A valid same-session control waiting in the socket on a delayed poll
+     * must renew the current peer before the deadline check. */
+    live_discover_activity(&discovery,first_pc,90);
+    assert(discovery.last_ack==46);
+    live_discover_activity(&discovery,next_pc,90);
+    assert(!live_discover_expire(&discovery,90,10));
+    assert(!live_discover_expire(&discovery,129,10));
+    assert(live_discover_expire(&discovery,130,10));
+    live_discover_activity(&discovery,next_pc,131);
+    assert(discovery.peer==0);
 
     discovery.challenge=UINT32_MAX;
     live_discover_probe(&discovery,session,probe);
