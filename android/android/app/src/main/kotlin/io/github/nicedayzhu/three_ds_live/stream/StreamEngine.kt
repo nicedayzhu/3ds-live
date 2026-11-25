@@ -817,6 +817,7 @@ class StreamEngine(
 
     private fun applyScreenMask() {
         assembler.requiredPanels = screenMask()
+        Logs.i("3ds-live", "layout=${settings.layout} mask=${screenMask()} required=${assembler.requiredPanels}")
     }
 
     private fun sendConfiguration(force: Boolean) {
