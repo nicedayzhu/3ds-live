@@ -1,0 +1,94 @@
+# 3DS Live — Android 接收端
+
+把 New 3DS 的上下双屏和游戏立体声，经局域网无线投到 Android 手机。接收端协议与 Windows 播放器一致（[PROTOCOL.md](../live/docs/PROTOCOL.md)），掌机端无需改动，可与 PC 二选一连接。
+
+设计依据：[DESIGN.md](../docs/android/DESIGN.md)（评估、架构、里程碑）与 [UI-SPEC.md](../docs/android/UI-SPEC.md)（设计令牌、页面、组件）。
+
+## 架构：Flutter 界面 + Kotlin 收流引擎
+
+```
+Flutter (Dart)                          Kotlin (前台服务)
+连接 / 直播 / 诊断 / 设置  ←MethodChannel→  StreamEngine
+主题、状态、布局、手势     ←EventChannel ←  发现、重组+FEC、行复用、LZ4、音频、纹理
+```
+
+- 界面、主题、状态、手势全部在 `lib/`（Flutter）；Kotlin 里没有 Android 界面代码。
+- 视频通过 `Texture`（`TextureRegistry.SurfaceProducer`）送入 Flutter：引擎把双屏合成到一张画布，Flutter 只做一次 GPU 采样。
+- 音频用 `AudioTrack` 低延迟输出；IMA ADPCM 解码与 32.728 kHz → 48 kHz 重采样在 `AudioPlayer.kt`。
+- 前台服务 `StreamService` 保证切到其他 App 时继续接收。
+
+## 目录
+
+| 路径 | 内容 |
+| --- | --- |
+| `lib/theme/app_theme.dart` | Material 3 主题与设计令牌（与 cia-bridge 同源） |
+| `lib/stream/models.dart` | 阶段、设备、统计、预设、设置模型 |
+| `lib/stream/live_controller.dart` | 应用状态；事件订阅、演示模式、设置持久化 |
+| `lib/stream/stream_bridge.dart` | MethodChannel / EventChannel 契约 |
+| `lib/ui/` | 连接页、直播页、画质弹层、诊断页、设置页、关于页与共享组件 |
+| `android/app/src/main/kotlin/.../stream/` | 协议与收流引擎（见下表） |
+| `test/app_test.dart` | Flutter widget 测试（412×915 视口） |
+| `android/app/src/test/kotlin/...` | JVM 协议测试（LZ4、JPEG 行、重组+FEC、Resolver） |
+
+引擎文件：
+
+| 文件 | 职责 |
+| --- | --- |
+| `Wire.kt` | 报文标签、长度与小端读写 |
+| `Assembler.kt` | R10 合并对重组、XOR 单洞恢复、修复请求触发、1 s 过期 |
+| `JpegRows.kt` | R17D/R17K 行解析与还原（15 行、RST 校验、EOI） |
+| `JpegHeader.kt` | 由 `codec/include/live_jpeg_wire.h` 生成的 629 字节 JPEGENC 头 |
+| `Lz4.kt` | 带字典的 LZ4 block 解码（R20D 下屏压缩） |
+| `ScreenResolver.kt` | 引用帧管理、R8J1/R17K/R17D/R20D → 可解码 JPEG |
+| `AudioPlayer.kt` | IMA ADPCM 解码、重采样、AudioTrack |
+| `VideoSink.kt` | JPEG 解码、双屏合成、Texture、截图 |
+| `StreamEngine.kt` | 发现、会话、配置、反馈、诊断窗口 |
+| `StreamService.kt` | 前台服务与通知 |
+| `MainActivity.kt` | 通道接线、权限/服务启动、设置持久化 |
+
+## 构建与测试
+
+需要 Flutter 3.47.9（Dart 3.13.7）、Android SDK（platform 36）与 JDK 17：
+
+```powershell
+$env:JAVA_HOME    = 'F:\work\music_online_apk\.toolchains\jdk17'
+$env:ANDROID_HOME = $env:ANDROID_SDK_ROOT = 'F:\work\music_online_apk\.toolchains\android-sdk'
+$flutter = 'D:\Games\Old_Times\3ds\cia-bridge\.toolchains\flutter-sdk\flutter\bin\flutter.bat'
+
+& $flutter analyze
+& $flutter test
+& $flutter build apk --debug          # build/app/outputs/flutter-apk/app-debug.apk
+```
+
+协议单测（JVM，无需设备）：
+
+```powershell
+cd android
+.\gradlew.bat testDebugUnitTest       # 23 tests
+```
+
+## 已实现
+
+- 发现与配对：广播/单播 `3DLP` 邀请、`3DLS`/`3DLA` 应答、4 s 端点租约、固定 IP。
+- 收流：`R10P`/`R10F` 合并重组、4 条 XOR 纠错、`R19P` 修复包、1 s 未完成丢弃。
+- 画面：`R8J1` 紧凑帧、`R17K` 参考帧、`R17D` 行增量、`R20D` LZ4 下屏；双屏合成到 Texture。
+- 音频：`R9A1` IMA ADPCM、48 kHz 输出、静音/音量。
+- 配置：`R6CF`/`R10C`/`R16C` 下发布、`R3FB` 反馈、`R17A`/`R19A`/`R20A` 能力应答。
+- 诊断：收齐 FPS、上/下屏、掌机上报的容量与质量、丢片、修复、行复用/LZ4 节省、音频覆盖。
+- 界面：连接页四态、直播页（竖屏双屏 / 横屏单屏与并排、手势缩放、控件自动隐藏与锁定）、画质弹层、诊断页、设置页、深浅色。
+- 设置持久化（SharedPreferences）。
+
+## 尚未实现
+
+- 录制 MP4 与截图分享（截图保存已实现；界面里的录制按钮会提示尚未启用）。
+- 旧版分屏格式 `R3P2`/`R3F2` 已收包计数但未合成；`R15P` 旧格式未处理。
+- 自适应码率控制器（当前把播放器设置直接下发，降档逻辑待接入）。
+- 效果（FBCNN/SPAN/RIFE）按设计不做。
+
+## 与 PC 播放器的差异
+
+| PC | Android |
+| --- | --- |
+| 窗口、多显示器、RTSP、FFmpeg 录制 | 单全屏、Texture 合成、MediaCodec 录制（待做） |
+| ONNX 画质增强与补帧 | 不做 |
+| 命令行参数 | 设置页 + 诊断页导出 JSON |
