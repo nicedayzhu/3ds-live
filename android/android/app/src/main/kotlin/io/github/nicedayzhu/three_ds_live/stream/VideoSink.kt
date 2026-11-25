@@ -76,7 +76,7 @@ class VideoSink(
     fun setLayout(next: Layout) {
         if (layout == next) return
         layout = next
-        refreshSurface()
+        forceRefresh()
     }
 
     /**
@@ -85,14 +85,15 @@ class VideoSink(
      * again on the first frame (or after a failed lock) makes the first picture appear
      * without the user touching the layout button.
      */
-    private fun refreshSurface() {
+    /** Must run on the platform thread: recreates the ImageReader-backed surface. */
+    fun forceRefresh() {
         try {
             producer.setSize(layout.width, layout.height)
-            surface = producer.getSurface()
+            surface = producer.getForcedNewSurface()
             lockFailures = 0
-            Log.i("3ds-live", "texture surface ${layout.width}x${layout.height} refreshed")
+            Log.i("3ds-live", "texture surface ${layout.width}x${layout.height} created")
         } catch (error: Throwable) {
-            Log.w("3ds-live", "texture surface refresh failed: ${error.message}")
+            Log.w("3ds-live", "texture surface create failed: ${error.message}")
         }
     }
 
@@ -107,14 +108,17 @@ class VideoSink(
     /** Publishes one pair; a missing screen reuses the previous one (keep-last-frame). */
     fun present(top: Bitmap?, bottom: Bitmap?, topQuality: Int, bottomQuality: Int) {
         if (top != null) {
+            // Recycle the previous frame: thirty 400x240 RGB_565 bitmaps per second
+            // would otherwise grow the native heap without bound.
+            if (lastTop !== top) lastTop?.recycle()
             lastTop = top
             lastTopQuality = topQuality
         }
         if (bottom != null) {
+            if (lastBottom !== bottom) lastBottom?.recycle()
             lastBottom = bottom
             lastBottomQuality = bottomQuality
         }
-        if (frames == 0L || lockFailures > 0) refreshSurface()
         val target = surface ?: return
         val canvas: Canvas = try {
             target.lockCanvas(null)

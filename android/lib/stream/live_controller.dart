@@ -157,6 +157,14 @@ class LiveController extends ChangeNotifier {
     }
   }
 
+  Future<void> viewAttached() async {
+    if (mockMode) return;
+    try {
+      await _bridge.viewAttached();
+    } on PlatformException catch (_) {
+    }
+  }
+
   Future<String?> capture() async {
     if (mockMode) {
       lastCapturePath = '/sdcard/Pictures/3DS Live/capture-demo.png';

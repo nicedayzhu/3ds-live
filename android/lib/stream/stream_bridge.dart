@@ -27,6 +27,8 @@ class StreamBridge {
 
   Future<String?> capture() => _method.invokeMethod<String>('capture');
 
+  Future<void> viewAttached() => _method.invokeMethod<void>('viewAttached');
+
   Future<void> setKeepScreenOn(bool on) =>
       _method.invokeMethod<void>('setKeepScreenOn', on);
 

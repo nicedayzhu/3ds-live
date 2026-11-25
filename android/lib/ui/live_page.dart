@@ -51,6 +51,7 @@ class _LivePageState extends State<LivePage> {
       if (controller.settings.keepAwake) {
         controller.setScreenOn(true);
       }
+      controller.viewAttached();
     }
     _scheduleHide();
   }
@@ -219,6 +220,17 @@ class _LivePageState extends State<LivePage> {
                 ),
               ),
             ),
+            if (controller.phase == StreamPhase.error)
+              Positioned(
+                top: 92,
+                left: 16,
+                right: 16,
+                child: NoticeBanner(
+                  text: controller.lastError ?? controller.message ?? '播放出错',
+                  icon: Icons.error_outline_rounded,
+                  tone: AppColors.ledError,
+                ),
+              ),
             if (controller.phase == StreamPhase.holding)
               const Positioned(
                 top: 96,

@@ -2,6 +2,8 @@ package io.github.nicedayzhu.three_ds_live.stream
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import io.flutter.view.TextureRegistry
@@ -81,6 +83,9 @@ class StreamEngine(
     private val recorder = Recorder(context)
     private var wifiLock: WifiManager.WifiLock? = null
     private val running = AtomicBoolean(false)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var refreshPosted = false
+    @Volatile private var viewAttached = false
 
     private var socket: DatagramSocket? = null
     private val frameQueue = ArrayBlockingQueue<Frame>(3)
@@ -211,6 +216,7 @@ class StreamEngine(
         setPhase("inviting", null)
         frameQueue.clear()
         lastPresentedPts = -1
+        viewAttached = false
         receiveThread = Thread({ receiveLoop() }, "3ds-live-rx").apply { start() }
         tickThread = Thread({ tickLoop() }, "3ds-live-tick").apply { start() }
         presentThread = Thread({ presentLoop() }, "3ds-live-present").apply { start() }
@@ -265,6 +271,22 @@ class StreamEngine(
     fun setLayout(layout: String) {
         settings.layout = layout
         sink.setLayout(VideoSink.Layout.from(layout))
+    }
+
+    /**
+     * Called from the platform thread when the live view mounts. Recreating the
+     * ImageReader surface here (and not from the decode thread) avoids racing a
+     * producer against its own consumer.
+     */
+    fun onViewAttached() {
+        val first = !viewAttached
+        viewAttached = true
+        try {
+            sink.forceRefresh()
+        } catch (error: Throwable) {
+            Log.w(TAG, "surface force refresh failed: ${error.message}")
+        }
+        if (first) Log.i(TAG, "live view attached, texture=${sink.textureId}")
     }
 
     fun capture(): String? = sink.capture()
@@ -609,6 +631,13 @@ class StreamEngine(
             } catch (_: InterruptedException) {
                 return
             } ?: continue
+            if (!viewAttached && framesPresented == 0L) {
+                // The Texture widget is not mounted yet; drawing now would race the
+                // surface creation and the frame would be stale anyway.
+                lastPresentedPts = -1
+                continue
+            }
+            try {
             val signed = if (lastPresentedPts < 0) 0 else (frame.pts - lastPresentedPts).toInt()
             if (lastPresentedPts >= 0 && signed < -20_000) {
                 lateFrames++
@@ -633,6 +662,10 @@ class StreamEngine(
                 Log.i(TAG, "presented=$framesPresented top=${topBitmap?.width}x${topBitmap?.height} "
                     + "bottom=${bottomBitmap?.width}x${bottomBitmap?.height} q=${frame.topQuality} "
                     + "late=$lateFrames dropped=$droppedFrames")
+            }
+            } catch (error: Throwable) {
+                Log.e(TAG, "present failed: ${error.message}", error)
+                events(mapOf("type" to "error", "message" to "画面呈现失败：${error.message}"))
             }
         }
     }

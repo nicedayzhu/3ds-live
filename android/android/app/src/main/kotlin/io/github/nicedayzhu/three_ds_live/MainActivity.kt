@@ -3,6 +3,7 @@ package io.github.nicedayzhu.three_ds_live
 import android.content.Intent
 import android.os.Build
 import android.os.Handler
+import android.util.Log
 import android.os.Looper
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
@@ -18,6 +19,21 @@ class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private val main = Handler(Looper.getMainLooper())
     private val pending = ArrayDeque<Map<String, Any?>>()
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            Log.e("3ds-live", "uncaught on ${thread.name}", error)
+            try {
+                java.io.File(filesDir, "crash-last.txt").writeText(
+                    "thread=${thread.name}\n" + Log.getStackTraceString(error),
+                )
+            } catch (_: Throwable) {
+            }
+            previous?.uncaughtException(thread, error)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -88,6 +104,10 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "capture" -> result.success(engine?.capture())
+                "viewAttached" -> {
+                    engine?.onViewAttached()
+                    result.success(null)
+                }
                 "setKeepScreenOn" -> {
                     val on = call.arguments as? Boolean ?: false
                     runOnUiThread {
