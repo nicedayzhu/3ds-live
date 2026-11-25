@@ -190,6 +190,7 @@ void Receiver::run() {
     std::optional<quint32> lastTimingMs;
     quint32 lastScreenCounterMs = 0;
     int lastSentMask = 3;
+    qint64 lastMaskSentUs = 0;
     qint64 lastEncodedTop = -1, lastEncodedBottom = -1, lastSentTop = -1, lastSentBottom = -1;
     QJsonObject timing;
     qint64 lastPacingStatusUs = 0, lastTimingUs = 0;
@@ -780,6 +781,15 @@ void Receiver::run() {
                 socket.writeDatagram(message("R10C", {*current, request, quint32(freq), quint32(effective), 1}), peer, remote);
             }
             lastConfig = now;
+            lastMaskSentUs = now;
+        }
+        // The mask is state, not a one-shot command: a config sent before the
+        // handheld finished its handshake must be repeated, otherwise a single-
+        // screen selection silently falls back to dual-screen on the sender.
+        if (remote && current && now - lastMaskSentUs > 1000000 && now - lastSeen < 2000000) {
+            socket.writeDatagram(message("R23C", {*current, quint32(requested.mask)}), peer, remote);
+            lastMaskSentUs = now;
+            lastSentMask = config.mask;
         }
         if (now - tick < 1000000)
             continue;
