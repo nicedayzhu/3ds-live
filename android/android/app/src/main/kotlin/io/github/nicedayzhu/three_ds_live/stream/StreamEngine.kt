@@ -222,6 +222,7 @@ class StreamEngine(
         Logs.i(TAG, "started on udp ${settings.port}, layout=${settings.layout}, "
             + "fps=${settings.fps}, rate=${settings.rate}, quality=${settings.quality}")
         setPhase("inviting", null)
+        applyScreenMask()
         frameQueue.clear()
         lastPresentedPts = -1
         viewAttached = false
@@ -259,6 +260,7 @@ class StreamEngine(
         val layoutChanged = next.layout != settings.layout
         val targetChanged = next.handheldIp != settings.handheldIp
         settings = next
+        applyScreenMask()
         rate.reset(next.rate)
         audio.muted = next.muted
         audio.volume = next.volume
@@ -604,8 +606,8 @@ class StreamEngine(
     private fun onPair(pair: Assembler.Pair) {
         pairs++
         windowPairs++
-        val top = resolver.resolve(pair.top, 0)
-        val bottom = resolver.resolve(pair.bottom, 1)
+        val top = if (pair.top.isEmpty()) null else resolver.resolve(pair.top, 0)
+        val bottom = if (pair.bottom.isEmpty()) null else resolver.resolve(pair.bottom, 1)
         if (resolver.completePair(pair.seq, top, bottom)) {
             peerIp?.let { address ->
                 sendBinary(Wire.message(Wire.R17A, session, 1, pair.seq), address, peerPort)
@@ -815,6 +817,16 @@ class StreamEngine(
         }
     }
 
+    private fun screenMask(): Int = when (settings.layout) {
+        "topOnly" -> 1
+        "bottomOnly" -> 2
+        else -> 3
+    }
+
+    private fun applyScreenMask() {
+        assembler.requiredPanels = screenMask()
+    }
+
     private fun sendConfiguration(force: Boolean) {
         val address = peerIp ?: return
         val now = SystemClock.elapsedRealtimeNanos()
@@ -836,6 +848,11 @@ class StreamEngine(
         )
         sendBinary(
             Wire.message(Wire.R22C, session, settings.bottomFps),
+            address,
+            peerPort,
+        )
+        sendBinary(
+            Wire.message(Wire.R23C, session, screenMask()),
             address,
             peerPort,
         )

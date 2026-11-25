@@ -51,6 +51,7 @@ object Wire {
     const val R15C = "R15C"
     const val R16C = "R16C"
     const val R22C = "R22C"
+    const val R23C = "R23C"
     const val R3FB = "R3FB"
 
     fun tag(data: ByteArray, length: Int): String =

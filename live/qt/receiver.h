@@ -16,7 +16,7 @@ class Receiver {
     std::mutex mutex;
     QJsonObject snapshot, latestDelivery;
     struct Settings {
-        int fps, rate, quality;
+        int fps, rate, quality, mask;
         bool adaptive;
         quint64 revision = 0;
     };
@@ -28,7 +28,7 @@ class Receiver {
              quint16 handheldDiscoveryPort, int jpegQuality = 0, bool adaptiveRate = true,
              std::optional<int> packetPacing = {});
     ~Receiver();
-    void configure(int fps, int rate, int jpegQuality = 0, bool adaptiveRate = true);
+    void configure(int fps, int rate, int jpegQuality = 0, bool adaptiveRate = true, int screenMask = 3);
     QJsonObject stats();
 };
 } // namespace live

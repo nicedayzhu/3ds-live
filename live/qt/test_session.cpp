@@ -69,7 +69,7 @@ static int checkRifePreferences() {
                     for (auto *action : presets->menu()->actions())
                         if (action->data().toString() == "balanced30") action->trigger();
                     expectedRate = 2000000;
-                    expectedJpeg = 70;
+                    expectedJpeg = 60;
                     loaded &= jpegQuality->currentData().toInt() == expectedJpeg;
                 }
                 jpegQuality->setCurrentIndex(jpegQuality->findData(expectedJpeg));

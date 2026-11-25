@@ -126,11 +126,12 @@ Receiver::~Receiver() {
     stop = true;
     worker.join();
 }
-void Receiver::configure(int hz, int cap, int jpegQuality, bool adaptive) {
+void Receiver::configure(int hz, int cap, int jpegQuality, bool adaptive, int screenMask) {
     hz = int(live_migrate_fps(hz));
     std::lock_guard lock(mutex);
-    if (hz != requested.fps || cap != requested.rate || jpegQuality != requested.quality || adaptive != requested.adaptive) {
-        requested = {hz, cap, jpegQuality, adaptive, requested.revision + 1};
+    if (hz != requested.fps || cap != requested.rate || jpegQuality != requested.quality ||
+        adaptive != requested.adaptive || screenMask != requested.mask) {
+        requested = {hz, cap, jpegQuality, screenMask, adaptive, requested.revision + 1};
         latestDelivery = {};
     }
 }
@@ -772,7 +773,8 @@ void Receiver::run() {
             if (++request == 0)
                 ++request;
             if (deviceQuality) {
-                socket.writeDatagram(message("R16C", {*current, request, quint32(freq), quint32(effective),
+                socket.writeDatagram(message("R23C", {*current, quint32(requested.mask)}), peer, remote);
+        socket.writeDatagram(message("R16C", {*current, request, quint32(freq), quint32(effective),
                                                       1u, quint32(wireQuality)}), peer, remote);
             } else if (splitSupported) {
                 socket.writeDatagram(message("R15C", {*current, request, quint32(freq), quint32(effective),

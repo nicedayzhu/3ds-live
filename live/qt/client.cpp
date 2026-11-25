@@ -19,7 +19,8 @@ static const QMap<QString, QString> labels = {{"off", "原始"},
                                               {"sr", "Real-ESRGAN 2× 超分"},
                                               {"span", "2× 实时超分 · SPAN"}};
 struct Options {
-    QString ip, mode = "off", motion = "off", rifePrecision = "fp32", record, rtsp, stats, models;
+    QString ip, mode = "off", motion = "off", rifePrecision = "fp32", record, rtsp, stats, models,
+        layout = "stacked";
     int port = 8001, scale = 1, fps = 30, rate = 800000, jpegQuality = 0, delay = 100;
     std::optional<int> packetPacing;
     bool adaptiveRate = true, mute = false, debug = false;
@@ -48,7 +49,10 @@ static int pictureScale(const QString &mode, int requested) {
     if (isNativeDetail(mode)) return 1;
     return requested;
 }
-static bool validIp(const QString &ip) {
+static int layoutMask(const QString &layout) {
+    return layout == "top-only" ? 1 : layout == "bottom-only" ? 2 : 3;
+}
+bool validIp(const QString &ip) {
     return ip.isEmpty() || QHostAddress(ip).protocol() == QAbstractSocket::IPv4Protocol;
 }
 static bool validRtsp(const QString &url) {
@@ -75,6 +79,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     arg("interpolate", "off, flow or rife", "off");
     arg("rife-precision", "RIFE inference precision: fp32 (default) or fp16");
     arg("scale", "Display scale 1 or 2", "1");
+    arg("layout", "Screen layout: stacked, top-only or bottom-only", "stacked");
     arg("fps", "Source FPS (15, 20, 24 or 30)", "30");
     arg("rate", "Sender byte/s ceiling", "800000");
     arg("jpeg-quality", "Handheld JPEG quality target: 0 (automatic), 15, 20, 25, 30, 35, 40, 50, 60, 70 or 80", "0");
@@ -175,7 +180,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         if (o.fps != savedFps) prefs.setValue("fps", o.fps);
         o.rate = prefs.value("rate", 800000).toInt();
         o.adaptiveRate = prefs.value("adaptiveRate", true).toBool();
-        o.jpegQuality = prefs.value("jpegQuality", 0).toInt();
+        o.layout = prefs.value("layout", "stacked").toString();
+    o.jpegQuality = prefs.value("jpegQuality", 0).toInt();
         if (!isSourceJpegQuality(o.jpegQuality))
             o.jpegQuality = 0;
         o.mute = prefs.value("muted", false).toBool();
@@ -225,6 +231,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         receiver.reset();
         receiver = std::make_unique<Receiver>(timeline, pipeline, QHostAddress(o.ip), o.port, o.fps, o.rate,
                                               handheldDiscoveryPort, o.jpegQuality, o.adaptiveRate, o.packetPacing);
+        receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate, layoutMask(o.layout));
     };
     listen();
     QJsonObject modes;
@@ -239,7 +246,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                              {"ip", o.ip},
                              {"scale", o.scale},
                              {"port", o.port},
-                             {"jpegQuality", o.jpegQuality},
+                             {"jpegQuality", o.jpegQuality}, {"layout", o.layout},
                              {"adaptiveRate", o.adaptiveRate},
                              {"rtsp", o.rtsp},
                              {"interpolate", o.motion},
@@ -321,6 +328,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         prefs.setValue("rate", o.rate);
         prefs.setValue("adaptiveRate", o.adaptiveRate);
         prefs.setValue("jpegQuality", o.jpegQuality);
+    prefs.setValue("layout", o.layout);
         prefs.setValue("mode", requestedMode);
         prefs.setValue("motion", requestedMotion);
         prefs.setValue("scale", o.scale);
@@ -397,7 +405,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                     o.rate = cap;
                     o.jpegQuality = jpegQuality;
                     o.adaptiveRate = adaptive;
-                    receiver->configure(hz, cap, jpegQuality, adaptive);
+                    receiver->configure(hz, cap, jpegQuality, adaptive, layoutMask(o.layout));
                     remember();
                 }
                 updateView(view, {{"fps", hz}, {"rate", cap}, {"jpegQuality", jpegQuality}, {"adaptiveRate", adaptive}});
@@ -409,23 +417,33 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                     continue;
                 }
                 bool changed = ip != o.ip || e["port"].toInt() != o.port;
+                const QString nextLayout = e["layout"].toString(o.layout);
+                const bool layoutChanged = nextLayout != o.layout && (nextLayout == "stacked" || nextLayout == "top-only" || nextLayout == "bottom-only");
                 const int jpegQuality = e["jpegQuality"].toInt(o.jpegQuality);
                 const bool adaptive = e["adaptiveRate"].toBool(o.adaptiveRate);
                 if (!live_valid_fps(e["fps"].toInt()) || !isSourceJpegQuality(jpegQuality))
                     continue;
                 const bool limitsChanged = e["fps"].toInt() != o.fps || e["rate"].toInt() != o.rate ||
-                                           jpegQuality != o.jpegQuality || adaptive != o.adaptiveRate;
+                                           jpegQuality != o.jpegQuality || adaptive != o.adaptiveRate ||
+                                           layoutChanged;
                 o.ip = ip;
                 o.port = e["port"].toInt();
                 o.fps = e["fps"].toInt();
                 o.rate = e["rate"].toInt();
                 o.jpegQuality = jpegQuality;
                 o.adaptiveRate = adaptive;
+                if (layoutChanged) {
+                    o.layout = nextLayout;
+                    receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate,
+                                        nextLayout == "top-only" ? 1 : nextLayout == "bottom-only" ? 2 : 3);
+                    notify(nextLayout == "top-only" ? "仅上屏：已释放下屏编码与带宽" :
+                           nextLayout == "bottom-only" ? "仅下屏：已释放上屏编码与带宽" : "已恢复上下双屏");
+                }
                 if (changed)
                     listen();
                 else if (limitsChanged)
-                    receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate);
-                updateView(view, {{"fps", o.fps}, {"rate", o.rate}, {"jpegQuality", o.jpegQuality},
+                    receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate, layoutMask(o.layout));
+                updateView(view, {{"fps", o.fps}, {"rate", o.rate}, {"jpegQuality", o.jpegQuality}, {"layout", o.layout},
                                   {"adaptiveRate", o.adaptiveRate}});
                 int scale = e["scale"].toInt();
                 QString motion = e["motion"].toString();

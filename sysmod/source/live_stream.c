@@ -83,6 +83,10 @@ static u32 jobKind,jobQuality,jobDone,jobSize[2],jobChanged[2],jobUs[2];
 #define BOTTOM_REUSE_BYTES 24576u
 static u8 bottomReuse[BOTTOM_REUSE_BYTES];
 static u32 bottomReuseSize,bottomCounter,bottomReusedFrames,bottomFps=8;
+/* Bit 0 = top screen, bit 1 = bottom screen. A single-screen mask skips the
+ * hidden encoder entirely and sends per-screen packets, so both ARM11 time and
+ * airtime are released instead of rendering a panel nobody displays. */
+static u32 screenMask=3;
 static u32 attempts[2],jpegFrames[2],maxUs[2],maxBytes[2],convertCount[2],convertMaxUs[2];
 static u64 sumUs[2],convertSumUs[2],changedMcus[2];
 static u64 convertedMcus[2],snapshotSumUs;
@@ -204,6 +208,14 @@ static void encode_job(unsigned sc,unsigned kind,unsigned q) {
     jobSize[sc]=(u32)live_jpeg_render(sc,q,encoded[sc],MAX_JPEG);
     jobUs[sc]+=(u32)((svcGetSystemTick()-begin)*1000000/SYSCLOCK_ARM11);
 }
+static bool run_single_job(unsigned kind,unsigned q,unsigned sc) {
+    jobKind=kind;jobQuality=q;
+    if(sc==0) { encode_job(0,kind,q); return !stopped(); }
+    __atomic_store_n(&jobDone,0,__ATOMIC_RELEASE);LightEvent_Signal(&events[1]);
+    while(!__atomic_load_n(&jobDone,__ATOMIC_ACQUIRE)&&!stopped())LightEvent_WaitTimeout(&events[2],1000000);
+    return !stopped();
+}
+
 static bool run_pair_job(unsigned kind,unsigned q,bool bottom) {
     jobKind=kind;jobQuality=q;
     if(!bottom) {
@@ -441,10 +453,10 @@ static void encoder(void *arg) {
         stamp=planStamp;ready=planMask==3&&live_plan_available(&consumed,stamp);
         wanted[0]=planPts[0];wanted[1]=planPts[1];
         jobRate=rate;jobFps=fps;epoch=configEpoch;
-        bool combined=combinedFec;
+        bool combined=combinedFec&&screenMask==3;
         unsigned targetQ=qualityTarget;
         bool useRows=rowsEnabled&&combined&&compactJpeg;
-        bool bottomRows=bottomFps>=jobFps;
+        bool bottomRows=combined&&bottomFps>=jobFps;
         bool useR20=useRows&&bottomRows&&r20_recent(now);
         RowAnchor *base=useRows?rowBase:NULL;
         RowAnchor *probe=useRows?rowProbe:NULL;
@@ -480,6 +492,26 @@ static void encoder(void *arg) {
         for(unsigned i=0;i<2;i++){sourceReuse[i]+=pairs&&source[i]==lastSource[i];lastSource[i]=source[i];jobUs[i]=0;}
         pairs++;u32 seq=++sequence;unsigned q=targetQ?targetQ:quality;
         live_timing_begin(seq,stamp);
+        if(screenMask!=3) {
+            const unsigned sc=(screenMask&1)?0:1;
+            if(!run_single_job(1,q,sc))break;
+            live_timing_encoded();
+            const size_t packed=compactJpeg?
+                live_jpeg_wire_pack(encoded[sc],MAX_JPEG,encoded[sc],jobSize[sc],sc?320:400,q):0;
+            const u32 wire=packed?(u32)packed:jobSize[sc];
+            if(!jobSize[sc]||wire>budget) { oversize++; continue; }
+            LivePendingPair incoming={.length={sc==0?wire:0,sc==1?wire:0},
+                                      .seq=seq,.stamp=stamp,.epoch=epoch,.r20=false};
+            u32 bytes=live_pending_bytes(&incoming);
+            while(!live_pending_fits(&pending,bytes,sizeof pendingBytes)) {
+                discard_pending(pending.head,TIMING_REPLACED);
+                replaced++;
+            }
+            unsigned slot=live_pending_append(&pending,pendingBytes,sizeof pendingBytes,incoming);
+            LivePendingPair *pair=&pending.slots[slot];
+            memcpy(pendingBytes+pair->offset,encoded[sc],wire);
+            continue;
+        }
         const u32 bottomPeriod=bottomFps?(jobFps+bottomFps-1)/bottomFps:0;
         bool bottom=bottomReuseSize==0||(bottomFps&&(bottomCounter++%bottomPeriod)==0);
         if(!bottom)bottomReusedFrames++;
@@ -954,6 +986,21 @@ static void control(u64 *due) {
                 peer_activity(now);
                 continue;
             }
+            if(n==12&&!memcmp(msg,"R23C",4)) {
+                u32 mask=get32(msg+8);
+                if(mask>=1&&mask<=3) {
+                    peer_activity(now);
+                    LightLock_Lock(&lock);
+                    if(mask!=screenMask) {
+                        screenMask=mask;
+                        while(pending.count)discard_pending(pending.head,TIMING_RECONFIGURED);
+                        bottomReuseSize=0;
+                        rowBase=rowCandidate=NULL;
+                    }
+                    LightLock_Unlock(&lock);
+                }
+                continue;
+            }
             if(n==12&&!memcmp(msg,"R22C",4)) {
                 u32 fps=get32(msg+8);
                 if(fps==0||fps==5||fps==8||fps==10||fps==15||fps==30) {
@@ -1206,13 +1253,14 @@ static void sender(void *unused) {
         if(!ready){if(!send_repair(&pacing.totalDue,svcGetSystemTick(),0))svcSleepThread(500000);continue;}
         if(!cached){expired++;live_timing_finish(TIMING_TOO_OLD);continue;}
         u32 screenChunks[2]={live_data_packets(sizes[0]),live_data_packets(sizes[1])};
-        u32 dataCount=combinedFec?live_data_packets(sizes[0]+sizes[1]):screenChunks[0]+screenChunks[1];
-        u32 wire=combinedFec?live_combined_wire(sizes[0]+sizes[1]):
+        const bool shared=combinedFec&&sizes[0]&&sizes[1];
+        u32 dataCount=shared?live_data_packets(sizes[0]+sizes[1]):screenChunks[0]+screenChunks[1];
+        u32 wire=shared?live_combined_wire(sizes[0]+sizes[1]):
             live_screen_wire(sizes[0])+live_screen_wire(sizes[1]);
-        repairCredit=combinedFec?live_repair_allowance(live_av_video_rate(rate,audioEnabled),fps,wire):0;
+        repairCredit=shared?live_repair_allowance(live_av_video_rate(rate,audioEnabled),fps,wire):0;
         live_video_slot(&pacing.video,queued,wire,dataCount,fps,live_av_video_rate(rate,audioEnabled));
 #ifdef LIVE_FRAME_TIMING
-        u32 parityCount=combinedFec?live_parity_packets(dataCount,LIVE_PAIR_PARITY):
+        u32 parityCount=shared?live_parity_packets(dataCount,LIVE_PAIR_PARITY):
             live_parity_packets(screenChunks[0],LIVE_PARITY)+live_parity_packets(screenChunks[1],LIVE_PARITY);
         live_timing_plan(dataCount,dataCount+parityCount);
 #endif
@@ -1221,7 +1269,7 @@ static void sender(void *unused) {
         if(begin-queued>SYSCLOCK_ARM11/fps*2){expired++;live_timing_finish(TIMING_TOO_OLD);continue;}
         pacing.firstPacket=true;
         u8 parity[LIVE_PAIR_PARITY][LIVE_CHUNK]={0};bool ok=true;
-        if(combinedFec) {
+        if(shared) {
             u8 fragment[LIVE_CHUNK];u32 count=dataCount;
             /* Shift repeated keys by a third so the same short Wi-Fi fade
              * need not erase the same offsets on each pass. */
@@ -1252,9 +1300,9 @@ static void sender(void *unused) {
             }
         }
         sendActiveTicks+=svcGetSystemTick()-begin;
-        cached->complete=ok&&combinedFec;
+        cached->complete=ok&&shared;
         if(ok){
-            if(!sentFrame||lastSentSeq!=seq){frames[0]++;if(sizes[1])frames[1]++;}
+            if(!sentFrame||lastSentSeq!=seq){if(sizes[0])frames[0]++;if(sizes[1])frames[1]++;}
             sentFrame=true;lastSentSeq=seq;
             live_timing_finish(TIMING_SENT);
         }else expired++;
@@ -1274,7 +1322,7 @@ Result live_start(void *(*allocate)(u32 bytes)) {
     memset(changedMcus,0,sizeof changedMcus);memset(sourceReuse,0,sizeof sourceReuse);memset(lastSource,0,sizeof lastSource);
     memset(frames,0,sizeof frames);memset(lastEncodeUs,0,sizeof lastEncodeUs);
     sequence=replaced=errors=expired=oversize=retries=pairs=sendCalls=sendMaxUs=feedbackCount=0;
-    configEpoch=configSequence=configChanges=ratePendingKept=rateEncodingKept=0;sendSumUs=0;lastErrno=0;qualityTarget=0;quality=60;spare=0;bottomReuseSize=0;bottomCounter=0;bottomReusedFrames=0;bottomFps=8;
+    configEpoch=configSequence=configChanges=ratePendingKept=rateEncodingKept=0;sendSumUs=0;lastErrno=0;qualityTarget=0;quality=60;spare=0;bottomReuseSize=0;bottomCounter=0;bottomReusedFrames=0;bottomFps=8;screenMask=3;
     payloadControl=(LivePayloadControl){.percent=100};
     compactSavedBytes=0;compactFrames=compactFallbacks=0;
     rowsEnabled=false;rowBase=rowCandidate=rowProbe=rowBanks=NULL;

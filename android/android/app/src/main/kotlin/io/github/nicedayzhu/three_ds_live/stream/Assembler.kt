@@ -59,6 +59,8 @@ class Assembler(
     private val screenPartials = LinkedHashMap<Int, ScreenPartial>()
     private val readyScreens = HashMap<Int, ByteArray>()
     private val completedRing = ArrayDeque<Int>()
+    /** 1 = top only, 2 = bottom only, 3 = both. Set from the client layout. */
+    var requiredPanels = 3
     var combined = false
         private set
     var pairsCompleted = 0L
@@ -302,14 +304,26 @@ class Assembler(
             }
             screenPartials.remove(key)
             readyScreens[key] = joined
+            val needTop = requiredPanels and 1 != 0
+            val needBottom = requiredPanels and 2 != 0
             val top = readyScreens[seq * 2]
             val bottom = readyScreens[seq * 2 + 1]
-            if (top != null && bottom != null) {
+            if ((!needTop || top != null) && (!needBottom || bottom != null)) {
                 readyScreens.remove(seq * 2)
                 readyScreens.remove(seq * 2 + 1)
                 pairsCompleted++
                 remember(seq)
-                onComplete(Pair(seq, partial.pts, partial.fps, top, bottom, false, now))
+                onComplete(
+                    Pair(
+                        seq,
+                        partial.pts,
+                        partial.fps,
+                        top ?: ByteArray(0),
+                        bottom ?: ByteArray(0),
+                        false,
+                        now,
+                    ),
+                )
             }
         }
         return true

@@ -13,6 +13,7 @@ namespace {
 class Canvas final : public QWidget {
     QSize sourceSize;
     QImage image;
+    QString screenLayout = "stacked";
     std::function<void()> onPainted;
     QElapsedTimer submitClock;
     qint64 paintedChanges = 0, coalesced = 0, maxPaintNs = 0;
@@ -31,6 +32,7 @@ class Canvas final : public QWidget {
         notice->hide();
     }
     QSize sizeHint() const override { return sourceSize; }
+    void setLayoutMode(const QString &mode) { screenLayout = mode; update(); }
     void setSourceSize(QSize size) {
         sourceSize = size;
         updateGeometry();
@@ -73,12 +75,17 @@ class Canvas final : public QWidget {
             onPainted = {};
             return;
         }
-        QSize sz = image.size().scaled(size(), Qt::KeepAspectRatio);
+        QImage shown = image;
+        if (screenLayout == "top-only" && image.height() > 1)
+            shown = image.copy(0, 0, image.width(), image.height() / 2);
+        else if (screenLayout == "bottom-only" && image.height() > 1)
+            shown = image.copy(0, image.height() / 2, image.width(), image.height() - image.height() / 2);
+        QSize sz = shown.size().scaled(size(), Qt::KeepAspectRatio);
         QRect target(QPoint((width() - sz.width()) / 2, (height() - sz.height()) / 2), sz);
         if (target != rect())
             p.fillRect(rect(), Qt::black);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, sz != image.size());
-        p.drawImage(target, image);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, sz != shown.size());
+        p.drawImage(target, shown);
         if (submitClock.isValid()) {
             ++paintedChanges;
             maxPaintNs = std::max(maxPaintNs, submitClock.nsecsElapsed());
@@ -144,7 +151,8 @@ class Viewer final : public QWidget {
     QAction *recordAction, *mute = nullptr, *openFile, *openFolder;
     QDialog *settings;
     QTabWidget *settingsTabs;
-    QComboBox *fps, *rate, *rateMode, *jpegQuality, *motion, *scale, *rifePrecision = nullptr;
+    QComboBox *fps, *rate, *rateMode, *jpegQuality, *layoutChoice, *motion, *scale, *rifePrecision = nullptr;
+    QString screenLayout = "stacked";
     QLineEdit *ip, *rtsp;
     QSpinBox *port;
     struct EffectChoice {
@@ -617,11 +625,19 @@ class Viewer final : public QWidget {
         jpegQuality = new QComboBox(settings);
         jpegQuality->setObjectName("jpegQuality");
         jpegQuality->addItem("自动", 0);
-        for (int q : {15, 20, 25, 30, 35, 40, 50, 60, 70, 80})
+        for (int q : {20, 40, 60, 80})
             jpegQuality->addItem(QString("Q%1").arg(q), q);
         jpegQuality->setCurrentIndex(std::max(0, jpegQuality->findData(o["jpegQuality"].toInt())));
         jpegQuality->setToolTip("控制掌机上下屏的 JPEG 编码。Q 越高，通常越清晰、每帧也越大。自动档按带宽预算选择质量。");
         stream->addRow("JPEG 质量", jpegQuality);
+        layoutChoice = new QComboBox(settings);
+        layoutChoice->setObjectName("layoutChoice");
+        layoutChoice->addItem("上下双屏", "stacked");
+        layoutChoice->addItem("仅上屏", "top-only");
+        layoutChoice->addItem("仅下屏", "bottom-only");
+        layoutChoice->setCurrentIndex(std::max(0, layoutChoice->findData(o.value("layout").toString())));
+        layoutChoice->setToolTip("仅显示一个屏幕时，掌机会停止另一屏的编码和发送，释放算力与带宽。");
+        picture->addRow("画面布局", layoutChoice);
         jpegSettingsStatus = new QLabel(streamPage);
         jpegSettingsStatus->setWordWrap(true);
         stream->addRow(jpegSettingsStatus);
@@ -683,6 +699,7 @@ class Viewer final : public QWidget {
                                      {"rate", rate->currentData().toInt()},
                                      {"adaptiveRate", rateMode->currentData().toBool()},
                                      {"jpegQuality", jpegQuality->currentData().toInt()},
+                                     {"layout", layoutChoice->currentData().toString()},
                                      {"ip", ip->text().trimmed()},
                                      {"port", port->value()},
                                      {"scale", scale->currentData().toInt()},
@@ -974,7 +991,9 @@ class Viewer final : public QWidget {
     void updatePictureScale(const QString &mode, int value) {
         scale->setCurrentIndex(value == 2);
         scale->setEnabled(mode != "sr" && mode != "span" && mode != "fast-detail" && mode != "fbcnn-detail" && mode != "fbcnn-sr");
-        QSize target(400 * value, 480 * value);
+        QSize target = screenLayout == "top-only" ? QSize(400 * value, 240 * value)
+                     : screenLayout == "bottom-only" ? QSize(320 * value, 240 * value)
+                     : QSize(400 * value, 480 * value);
         if (target == canvas->sizeHint()) return;
         canvas->setSourceSize(target);
         if (!isMaximized() && !isFullScreen()) fitCanvas(target);
@@ -991,6 +1010,15 @@ class Viewer final : public QWidget {
             canvas->message(v["notice"].toString());
         if (v.contains("quality"))
             quality->setText(v["quality"].toString());
+        if (v.contains("layout")) {
+            const QString next = v["layout"].toString();
+            if (next != screenLayout) {
+                screenLayout = next;
+                canvas->setLayoutMode(next);
+                if (layoutChoice) layoutChoice->setCurrentIndex(std::max(0, layoutChoice->findData(next)));
+                updatePictureScale("", scale ? scale->currentData().toInt() : 1);
+            }
+        }
         if (v.contains("fpsOptions")) {
             fps->clear();
             rate->clear();

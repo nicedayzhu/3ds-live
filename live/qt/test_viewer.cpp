@@ -277,17 +277,18 @@ int main(int argc, char **argv) {
         !cap->menu()->actions().contains(fixed)) return 103;
     auto *jpegMenu = root->findChild<QMenu *>("jpegQualityMenu");
     auto *jpegChoice = root->findChild<QComboBox *>("jpegQuality");
-    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 11 || jpegChoice->currentData().toInt() != 0 ||
+    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 5 || jpegChoice->currentData().toInt() != 0 ||
         sourceJpeg->menu() != jpegMenu || sourceJpeg->text() != "自动Q" ||
         pictureMenu->actions().contains(jpegMenu->menuAction()))
         return 95;
     auto *sharp = actionFor(jpegMenu, "60");
-    auto *q70 = actionFor(jpegMenu, "70");
+    auto *q80 = actionFor(jpegMenu, "80");
+    auto *detailed = q80;
     auto *automatic = actionFor(jpegMenu, "0");
-    auto *detailed = actionFor(jpegMenu, "80");
-    if (!sharp || !q70 || !automatic || !automatic->isChecked() || !actionFor(jpegMenu, "40") || !detailed) return 96;
-    q70->trigger();
-    if (actions() != QJsonArray{QJsonObject{{"type","limit"},{"jpegQuality",70}}}) return 138;
+    auto *q40 = actionFor(jpegMenu, "40");
+    if (!sharp || !q80 || !automatic || !automatic->isChecked() || !q40) return 96;
+    q80->trigger();
+    if (actions() != QJsonArray{QJsonObject{{"type","limit"},{"jpegQuality",80}}}) return 138;
     sharp->trigger();
     if (actions() != QJsonArray{QJsonObject{{"type", "limit"}, {"jpegQuality", 60}}}) return 97;
     update(R"({"jpegQuality":60})");
@@ -512,28 +513,26 @@ int main(int argc, char **argv) {
     if (!jpegStatus->isVisible() || !jpegStatus->text().contains("未确认")) return 99;
     update(R"({"debug":{"connection":"live","requested_jpeg_quality":60,"device_jpeg_quality":60,"jpeg_quality_confirmed":true}})");
     if (!jpegStatus->isVisible() || !jpegStatus->text().contains("已采用 Q60")) return 100;
-    update(R"({"jpegQuality":70,"debug":{"connection":"live","requested_jpeg_quality":70,"device_jpeg_quality":60,"jpeg_q70_supported":false}})");
-    if (!jpegStatus->text().contains("等待掌机报告 Q70 支持") || !jpegStatus->text().contains("当前目标 Q60") ||
-        sourceJpeg->text() != "Q70 待确认") return 139;
-    update(R"({"debug":{"connection":"live","requested_jpeg_quality":70,"device_jpeg_quality":70,"jpeg_q70_supported":true,"jpeg_quality_confirmed":true}})");
-    if (!jpegStatus->text().contains("已采用 Q70") || sourceJpeg->text() != "Q70") return 140;
+    update(R"({"jpegQuality":60,"debug":{"connection":"live","requested_jpeg_quality":60,"device_jpeg_quality":60,"jpeg_q70_supported":false}})");
+    if (!jpegStatus->text().contains("Q60") || sourceJpeg->text() != "Q60") return 139;
+    update(R"({"debug":{"connection":"live","requested_jpeg_quality":60,"device_jpeg_quality":60,"jpeg_q70_supported":true,"jpeg_quality_confirmed":true}})");
+    if (!jpegStatus->text().contains("已采用 Q60") || sourceJpeg->text() != "Q60") return 140;
     update(R"({"fpsOptions":[24,30],"rateOptions":[1000000,1600000,2000000],"fps":24,"rate":1000000})");
     auto *hd = actionFor(limits, "hd30");
     auto *balancedNow = actionFor(limits, "balanced30");
     auto *low = actionFor(limits, "low24");
     auto *saver = actionFor(limits, "saver30");
-    auto *tiny = actionFor(limits, "tiny24");
     auto *presetButton = root->findChild<QToolButton *>("streamPresets");
-    if (!hd || !balancedNow || !low || !saver || !tiny || !presetButton) return 130;
+    if (!hd || !balancedNow || !low || !saver || !presetButton) return 130;
     QList<QAction *> streamActions;
     for (auto *action : limits->actions())
         if (!action->isSeparator() && action->isVisible()) streamActions.append(action);
-    if (streamActions != QList<QAction *>{hd,balancedNow,low,saver,tiny,editStream} ||
+    if (streamActions != QList<QAction *>{hd,balancedNow,low,saver,editStream} ||
         !hd->isCheckable() || !balancedNow->isCheckable() || !low->isCheckable() ||
-        !saver->isCheckable() || !tiny->isCheckable()) return 148;
+        !saver->isCheckable()) return 148;
     auto matchingPreset = [&](QAction *expected) {
         QMetaObject::invokeMethod(limits, "aboutToShow");
-        for (auto *action : {hd, balancedNow, low, saver, tiny})
+        for (auto *action : {hd, balancedNow, low, saver})
             if (action->isChecked() != (action == expected)) return false;
         return true;
     };
@@ -544,7 +543,7 @@ int main(int argc, char **argv) {
                                             {"jpegQuality",80},{"adaptiveRate",false}}}) return 131;
     update(R"({"fps":30,"jpegQuality":80,"rate":2000000,"adaptiveRate":false})");
     if (!matchingPreset(hd)) return 149;
-    update(R"({"jpegQuality":70})");
+    update(R"({"jpegQuality":60})");
     if (!matchingPreset(balancedNow)) return 150;
     update(R"({"adaptiveRate":true})");
     if (!matchingPreset(nullptr)) return 151;
@@ -556,10 +555,8 @@ int main(int argc, char **argv) {
     if (!matchingPreset(nullptr)) return 154;
     update(R"({"fps":24,"jpegQuality":40,"rate":1000000})");
     if (!matchingPreset(low)) return 155;
-    update(R"({"fps":30,"jpegQuality":25,"rate":800000,"adaptiveRate":false})");
+    update(R"({"fps":30,"jpegQuality":20,"rate":800000,"adaptiveRate":false})");
     if (!matchingPreset(saver)) return 158;
-    update(R"({"fps":24,"jpegQuality":20,"rate":600000})");
-    if (!matchingPreset(tiny)) return 159;
     update(R"({"fps":24,"jpegQuality":40,"rate":1000000})");
     if (!matchingPreset(low)) return 160;
     auto *balanced = actionFor(presetButton->menu(), "balanced30");
