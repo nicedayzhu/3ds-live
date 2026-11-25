@@ -298,6 +298,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     QJsonObject pictureFailures, motionFailures;
     EffectLoad pictureLoad, motionLoad;
     bool pictureBusy = false, motionBusy = false;
+    qint64 lastBusyToastUs = 0;
+    QString busyToastKey;
     qint64 loadSession = -1;
     qint64 lastPts = std::numeric_limits<qint64>::min(), presented = 0, onTime = 0, intermediate = 0,
            lastPresentWall = 0, largestGap = 0;
@@ -775,7 +777,22 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
             pictureBusy = slowPicture;
             motionBusy = slowMotion;
             publishEffects();
-            if (pictureBusy || motionBusy) notify("本机处理持续超时，可在画面与补帧设置中降低负载");
+            const QString key = o.mode + "|" + o.motion + "|" + (pictureBusy ? "p" : "") + (motionBusy ? "m" : "");
+            // A mode that cannot reach the source cadence flips the busy flag
+            // every few frames; warn once per mode instead of on every flap.
+            if ((pictureBusy || motionBusy) && (key != busyToastKey || now - lastBusyToastUs > 30000000)) {
+                if (pictureBusy && usesFbcnn(o.mode)) {
+                    notify(QString("%1 单帧约 %2 ms，当前约 %3 FPS；可换用快速档或把目标帧率降到 24")
+                               .arg(labels.value(o.mode))
+                               .arg(report.value("processing_ms").toDouble(), 0, 'f', 1)
+                               .arg(report.value("fps_presented").toDouble(), 0, 'f', 1));
+                } else {
+                    notify("本机处理持续超时，可在画面与补帧设置中降低负载");
+                }
+                busyToastKey = key;
+                lastBusyToastUs = now;
+            }
+            if (!pictureBusy && !motionBusy) busyToastKey.clear();
         }
         report["picture_over_budget"] = pictureBusy;
         report["motion_over_budget"] = motionBusy;
