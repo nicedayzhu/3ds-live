@@ -690,8 +690,10 @@ void Receiver::run() {
                         const double encoded = double(word(b, 6) - lastEncodedBottom);
                         if (pairs > 0)
                             device["device_bottom_reuse_percent"] = 100.0 * (1.0 - encoded / pairs);
-                        device["device_bottom_new_fps"] = device["device_encoded_bottom_fps"];
-                        device["device_bottom_packet_fps"] = device["device_sent_bottom_fps"];
+                        const auto newBottomFps = device.value("device_encoded_bottom_fps");
+                        const auto packetBottomFps = device.value("device_sent_bottom_fps");
+                        device["device_bottom_new_fps"] = newBottomFps;
+                        device["device_bottom_packet_fps"] = packetBottomFps;
                     }
                 }
                 lastScreenCounterMs = elapsed;
