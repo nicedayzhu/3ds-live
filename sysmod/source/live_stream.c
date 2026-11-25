@@ -1224,9 +1224,19 @@ static void sender(void *unused) {
             for(unsigned sc=0;sc<2;sc++)sizes[sc]=sendKey?rowCandidate->length[sc]:pair->length[sc];
             u64 reserved=svcGetSystemTick();
             u64 until=reserved+(u64)SYSCLOCK_ARM11*LIVE_REPAIR_HISTORY_MS/1000;
-            cached=live_repair_reserve(&repairHistory,sizeof sendArena,sizes[0],sizes[1],seq,stamp,fps,reserved,until);
+            static LiveRepairFrame singleFrame;
+            if(sizes[0]&&sizes[1]) {
+                cached=live_repair_reserve(&repairHistory,sizeof sendArena,sizes[0],sizes[1],seq,stamp,fps,reserved,until);
+            } else {
+                /* A single-screen stream has no second panel, so it cannot share
+                 * the two-panel repair arena; send it directly without repair. */
+                singleFrame=(LiveRepairFrame){0};
+                singleFrame.top=sizes[0];
+                singleFrame.bottom=sizes[1];
+                cached=&singleFrame;
+            }
             if(cached) {
-                sending[0]=sendArena+cached->offset;
+                sending[0]=sendArena+(sizes[0]&&sizes[1]?cached->offset:0);
                 sending[1]=sending[0]+sizes[0];
             }
             for(unsigned sc=0;cached&&sc<2;sc++) {

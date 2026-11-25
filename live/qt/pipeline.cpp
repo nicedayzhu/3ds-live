@@ -92,10 +92,11 @@ void Pipeline::submit(Pair pair, SourceFrame source) {
         if (i == 0) latestSource.arrival = source.arrival;
         updated = true;
     }
-    if (!updated || !latestSource.panels[0]) return;
+    if (!updated || (!latestSource.panels[0] && !latestSource.panels[1])) return;
     source.panels = latestSource.panels;
-    source.sequence = source.panels[0]->sequence;
-    source.pts = source.panels[0]->pts;
+    const auto &lead = latestSource.panels[0] ? latestSource.panels[0] : latestSource.panels[1];
+    source.sequence = lead->sequence;
+    source.pts = lead->pts;
     source.arrival = latestSource.arrival;
     pair.screens = latestWire;
     pair.jpegQuality = latestQuality;
@@ -162,10 +163,11 @@ void Pipeline::decodeLoop() {
         }
         const bool topUpdated = decodedPanels[0] && (!before[0] || before[0]->pts != decodedPanels[0]->pts);
         const bool bottomUpdated = decodedPanels[1] && (!before[1] || before[1]->pts != decodedPanels[1]->pts);
-        if (!decodedPanels[0] || (!topUpdated && !bottomUpdated)) continue;
+        if ((!decodedPanels[0] && !decodedPanels[1]) || (!topUpdated && !bottomUpdated)) continue;
         packet.source.panels = decodedPanels;
-        packet.source.sequence = decodedPanels[0]->sequence;
-        packet.source.pts = decodedPanels[0]->pts;
+        const auto &lead = decodedPanels[0] ? decodedPanels[0] : decodedPanels[1];
+        packet.source.sequence = lead->sequence;
+        packet.source.pts = lead->pts;
         decodeTotalUs += clockUs() - decodeStart;
         if (!needOriginal)
             original = {};

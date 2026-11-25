@@ -81,10 +81,12 @@ class Canvas final : public QWidget {
             return;
         }
         QImage shown = image;
+        const int panelScale = std::max(1, image.width() / 400);
         if (screenLayout == "top-only" && image.height() > 1)
             shown = image.copy(0, 0, image.width(), image.height() / 2);
         else if (screenLayout == "bottom-only" && image.height() > 1)
-            shown = image.copy(0, image.height() / 2, image.width(), image.height() - image.height() / 2);
+            shown = image.copy(40 * panelScale, image.height() / 2, 320 * panelScale,
+                               image.height() - image.height() / 2);
         else if (screenLayout == "side-by-side" && image.height() > 1) {
             const int half = image.height() / 2;
             const int scale = std::max(1, image.width() / 400);
@@ -94,7 +96,7 @@ class Canvas final : public QWidget {
             composer.drawImage(QRect(0, 0, 400 * scale, 240 * scale),
                                image, QRect(0, 0, 400, half));
             composer.drawImage(QRect(400 * scale, 0, 320 * scale, 240 * scale),
-                               image, QRect(0, half, 320, half));
+                               image, QRect(40 * scale, half, 320 * scale, half));
         }
         QSize sz = shown.size().scaled(size(), Qt::KeepAspectRatio);
         QRect target(QPoint((width() - sz.width()) / 2, (height() - sz.height()) / 2), sz);
