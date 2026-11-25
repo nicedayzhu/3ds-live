@@ -140,7 +140,8 @@ class VideoSink(
             }
         }
         recordFrame()
-        producer.scheduleFrame()
+        // No scheduleFrame() here: it is @UiThread, and the ImageReader/SurfaceTexture
+        // listener already schedules an engine frame when the buffer is queued.
         frames++
         lastPresentNanos = System.nanoTime()
         onStats(
