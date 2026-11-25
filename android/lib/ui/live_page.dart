@@ -104,11 +104,11 @@ class _LivePageState extends State<LivePage> {
     if (mounted) Navigator.of(context).pop();
   }
 
-  double _aspect(VideoLayout layout) => switch (layout) {
-        VideoLayout.stacked => 400 / 480,
-        VideoLayout.sideBySide => 720 / 240,
-        VideoLayout.topOnly => 400 / 240,
-        VideoLayout.bottomOnly => 320 / 240,
+  Size _canvasSize(VideoLayout layout) => switch (layout) {
+        VideoLayout.stacked => const Size(400, 480),
+        VideoLayout.sideBySide => const Size(720, 240),
+        VideoLayout.topOnly => const Size(400, 240),
+        VideoLayout.bottomOnly => const Size(320, 240),
       };
 
   @override
@@ -117,24 +117,29 @@ class _LivePageState extends State<LivePage> {
     final layout = controller.settings.layout;
     final textureId = controller.textureId;
 
+    final canvasSize = _canvasSize(layout);
+    final content = textureId != null
+        ? Texture(textureId: textureId)
+        : _PlaceholderCanvas(layout: layout);
+    final base = SizedBox(
+      width: canvasSize.width,
+      height: canvasSize.height,
+      child: content,
+    );
     final canvas = Container(
       color: Colors.black,
-      child: Center(
-        child: _zoom
-            ? AspectRatio(aspectRatio: _aspect(layout), child: const SizedBox.expand())
-            : Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 24),
-                child: FittedBox(
-                  fit: BoxFit.contain,
-                  child: AspectRatio(
-                    aspectRatio: _aspect(layout),
-                    child: textureId != null
-                        ? Texture(textureId: textureId)
-                        : _PlaceholderCanvas(layout: layout),
-                  ),
-                ),
+      child: _zoom
+          ? ClipRect(
+              child: Center(
+                child: Transform.scale(scale: 1.8, child: base),
               ),
-      ),
+            )
+          : Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 24),
+                child: FittedBox(fit: BoxFit.contain, child: base),
+              ),
+            ),
     );
 
     return PopScope(
@@ -332,12 +337,16 @@ class _TopHud extends StatelessWidget {
                   color: Colors.white, size: 20),
               tooltip: '返回',
             ),
-            StatusPill(
-              text: label,
-              color: phase.color,
-              onTap: onDiagnostics,
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: StatusPill(
+                  text: label,
+                  color: phase.color,
+                  onTap: onDiagnostics,
+                ),
+              ),
             ),
-            const Spacer(),
             if (recording)
               Container(
                 margin: const EdgeInsets.only(right: 4),

@@ -5,6 +5,7 @@ import 'package:three_ds_live/stream/models.dart';
 import 'package:three_ds_live/theme/app_theme.dart';
 import 'package:three_ds_live/ui/connect_page.dart';
 import 'package:three_ds_live/ui/diagnostics_page.dart';
+import 'package:three_ds_live/ui/live_page.dart';
 import 'package:three_ds_live/ui/quality_sheet.dart';
 import 'package:three_ds_live/ui/widgets.dart';
 
@@ -140,6 +141,51 @@ void main() {
     expect(controller.settings.adaptiveRate, isFalse);
 
     await tester.pumpWidget(const SizedBox());
+    controller.dispose();
+  });
+
+  testWidgets('live page hides its controls and restores them on tap',
+      (tester) async {
+    await _phoneViewport(tester);
+    final controller = LiveController(mock: true);
+    await controller.initialize();
+    await controller.start();
+    await tester.pump(const Duration(seconds: 2));
+
+    await tester.pumpWidget(
+      LiveScope(
+        controller: controller,
+        child: MaterialApp(
+          theme: buildAppTheme(Brightness.dark),
+          home: const LivePage(),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('停止'), findsOneWidget);
+    expect(
+      tester.widgetList<AnimatedOpacity>(find.byType(AnimatedOpacity)).any((w) => w.opacity == 1),
+      isTrue,
+    );
+
+    await tester.pump(const Duration(seconds: 4));
+    expect(
+      tester.widgetList<AnimatedOpacity>(find.byType(AnimatedOpacity)).any((w) => w.opacity == 0),
+      isTrue,
+    );
+
+    // A single tap waits for the double-tap window before it fires.
+    await tester.tapAt(const Offset(206, 500));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      tester.widgetList<AnimatedOpacity>(find.byType(AnimatedOpacity)).any((w) => w.opacity == 1),
+      isTrue,
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    controller.stop();
     controller.dispose();
   });
 }

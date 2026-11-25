@@ -130,3 +130,98 @@ class RateControllerTest {
         assertEquals(800_000, controller.requested)
     }
 }
+
+/**
+ * Feeds a synthetic session through the exact receive path: R10 packets -> assembler
+ * (with XOR) -> resolver (row reference, delta) and compares the decodable JPEG bytes.
+ */
+class SessionPipelineTest {
+    private var pair: Assembler.Pair? = null
+    private val resolver = ScreenResolver()
+
+    private fun assembler() = Assembler(
+        onComplete = { pair = it },
+        onIncomplete = { _, _ -> },
+        onNeedRepair = { _, _, _ -> },
+    )
+
+    private fun rows(width: Int, seed: Int): List<ByteArray> =
+        (0 until JpegRows.COUNT).map { row ->
+            ByteArray(8 + row) { index -> (((seed + row * 13 + index * 5) % 0x70) + 1).toByte() } +
+                byteArrayOf(0xFF.toByte(), (0xD0 + (row and 7)).toByte())
+        }
+
+    private fun compact(width: Int, quality: Int, data: List<ByteArray>): ByteArray {
+        val out = ArrayList<Byte>()
+        out.addAll(listOf('R'.code.toByte(), '8'.code.toByte(), 'J'.code.toByte(), '1'.code.toByte(), 1, quality.toByte()))
+        out.add((width and 0xFF).toByte())
+        out.add((width shr 8).toByte())
+        for (row in data) out.addAll(row.toList())
+        out.add(0xFF.toByte())
+        out.add(0xD9.toByte())
+        return out.toByteArray()
+    }
+
+    private fun key(width: Int, quality: Int, data: List<ByteArray>): ByteArray =
+        compact(width, quality, data).also {
+            it[0] = 'R'.code.toByte()
+            it[1] = '1'.code.toByte()
+            it[2] = '7'.code.toByte()
+            it[3] = 'K'.code.toByte()
+        }
+
+    private fun packet(seq: Int, top: ByteArray, bottom: ByteArray): ByteArray {
+        val joined = top + bottom
+        val buffer = java.nio.ByteBuffer.allocate(Wire.HEADER_R10 + joined.size)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buffer.put(Wire.R10P.toByteArray(Charsets.US_ASCII))
+        buffer.putInt(42)
+        buffer.putInt(seq)
+        buffer.putInt(1000 + seq)
+        buffer.putInt(top.size)
+        buffer.putInt(bottom.size)
+        buffer.putInt(0)
+        buffer.putInt(30)
+        buffer.put(joined)
+        return buffer.array()
+    }
+
+    @Test
+    fun publishesAKeyPairThenADeltaPair() {
+        val assembler = assembler()
+        val topRows = rows(400, 1)
+        val bottomRows = rows(320, 90)
+        val keyTop = key(400, 70, topRows)
+        val keyBottom = key(320, 60, bottomRows)
+        val first = packet(1, keyTop, keyBottom)
+        assembler.submit(first, first.size, 1_000_000)
+
+        val completed = pair!!
+        val top = resolver.resolve(completed.top, 0)
+        val bottom = resolver.resolve(completed.bottom, 1)
+        assertTrue(resolver.completePair(completed.seq, top, bottom))
+
+        val changed = byteArrayOf(0x21, 0x31, 0xFF.toByte(), 0xD5.toByte())
+        val expectedCompact = compact(320, 60, bottomRows.mapIndexed { index, row -> if (index == 5) changed else row })
+        val delta = ByteArray(20 + 4 + changed.size)
+        val header = java.nio.ByteBuffer.wrap(delta).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        header.put(Wire.R17D.toByteArray(Charsets.US_ASCII))
+        header.put(1)
+        header.put(60)
+        header.putShort(320)
+        header.putInt(1)
+        header.putShort((1 shl 5).toShort())
+        header.putShort(0)
+        header.putInt(expectedCompact.size)
+        header.putInt(changed.size)
+        header.put(changed)
+
+        val second = packet(2, compact(400, 70, topRows), delta)
+        assembler.submit(second, second.size, 2_000_000)
+        val deltaPair = pair!!
+        assertEquals(2, deltaPair.seq)
+        val resolvedBottom = resolver.resolve(deltaPair.bottom, 1)
+        assertNotNull(resolvedBottom)
+        assertArrayEquals(JpegHeader.expand(expectedCompact), resolvedBottom!!.jpeg)
+    }
+}

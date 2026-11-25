@@ -27,8 +27,8 @@ Flutter (Dart)                          Kotlin (前台服务)
 | `lib/stream/stream_bridge.dart` | MethodChannel / EventChannel 契约 |
 | `lib/ui/` | 连接页、直播页、画质弹层、诊断页、设置页、关于页与共享组件 |
 | `android/app/src/main/kotlin/.../stream/` | 协议与收流引擎（见下表） |
-| `test/app_test.dart` | Flutter widget 测试（412×915 视口） |
-| `android/app/src/test/kotlin/...` | JVM 协议测试（LZ4、JPEG 行、重组+FEC、Resolver） |
+| `test/app_test.dart` | Flutter widget 测试（412×915 视口，7 个） |
+| `android/app/src/test/kotlin/...` | JVM 协议测试（LZ4、JPEG 行、重组+FEC、Resolver、码率、整条会话，31 个） |
 
 引擎文件：
 
@@ -64,7 +64,7 @@ $flutter = 'D:\Games\Old_Times\3ds\cia-bridge\.toolchains\flutter-sdk\flutter\bi
 
 ```powershell
 cd android
-.\gradlew.bat testDebugUnitTest       # 23 tests
+.\gradlew.bat testDebugUnitTest       # 31 tests
 ```
 
 ## 已实现
