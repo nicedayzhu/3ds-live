@@ -11,6 +11,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.SocketTimeoutException
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -63,6 +65,15 @@ class StreamEngine(
         private const val TAG = "3ds-live"
     }
 
+    private class Frame(
+        val seq: Int,
+        val pts: Long,
+        val top: ByteArray?,
+        val bottom: ByteArray?,
+        val topQuality: Int,
+        val bottomQuality: Int,
+    )
+
     private val sink = VideoSink(context, registry) { quality, _, _ ->
         lastQuality = quality
     }
@@ -72,8 +83,14 @@ class StreamEngine(
     private val running = AtomicBoolean(false)
 
     private var socket: DatagramSocket? = null
+    private val frameQueue = ArrayBlockingQueue<Frame>(3)
+    @Volatile private var lastPresentedPts = -1L
+    private var framesPresented = 0L
+    private var lateFrames = 0L
+    private var droppedFrames = 0L
     private var receiveThread: Thread? = null
     private var tickThread: Thread? = null
+    private var presentThread: Thread? = null
 
     var settings = Settings()
         private set
@@ -123,7 +140,7 @@ class StreamEngine(
     private var repairTimeouts = 0L
     private var statsIncomplete = 0L
     private var statsDropped = 0L
-    private var lastQuality = 0
+    @Volatile private var lastQuality = 0
     private var audioBlocks = 0L
     private var audioDropped = 0L
 
@@ -192,13 +209,20 @@ class StreamEngine(
         Log.i(TAG, "started on udp ${settings.port}, layout=${settings.layout}, "
             + "fps=${settings.fps}, rate=${settings.rate}, quality=${settings.quality}")
         setPhase("inviting", null)
+        frameQueue.clear()
+        lastPresentedPts = -1
         receiveThread = Thread({ receiveLoop() }, "3ds-live-rx").apply { start() }
         tickThread = Thread({ tickLoop() }, "3ds-live-tick").apply { start() }
+        presentThread = Thread({ presentLoop() }, "3ds-live-present").apply { start() }
     }
 
     fun stop() {
         stopRecording()
         if (!running.getAndSet(false)) return
+        presentThread?.interrupt()
+        presentThread?.join(300)
+        presentThread = null
+        frameQueue.clear()
         receiveThread?.join(300)
         tickThread?.join(300)
         receiveThread = null
@@ -558,20 +582,59 @@ class StreamEngine(
         }
         if (resolver.consumeFreshKeyRequest()) requestFreshKey()
         if (top == null && bottom == null) return
-        val topBitmap = top?.let { sink.decode(it.jpeg) }
-        val bottomBitmap = bottom?.let { sink.decode(it.jpeg) }
-        if (topBitmap == null && bottomBitmap == null) {
-            if (pairs <= 3) Log.w(TAG, "pair $pair.seq decoded no bitmap (top=${top != null}, bottom=${bottom != null})")
-            return
-        }
-        if (pairs == 1L || pairs % 300L == 0L) {
-            Log.i(TAG, "pairs=$pairs top=${topBitmap?.width}x${topBitmap?.height} "
-                + "bottom=${bottomBitmap?.width}x${bottomBitmap?.height} q=${top?.quality}")
-        }
-        sink.present(topBitmap, bottomBitmap, top?.quality ?: 0, bottom?.quality ?: 0)
         if (pair.usedRepair) repairedPairs++
         recordRowSavings(pair, top, bottom)
+        val frame = Frame(
+            pair.seq,
+            pair.pts,
+            top?.jpeg,
+            bottom?.jpeg,
+            top?.quality ?: 0,
+            bottom?.quality ?: 0,
+        )
+        // Decoding and Canvas composition must not block socket reads or audio.
+        if (!frameQueue.offer(frame)) {
+            frameQueue.poll()
+            frameQueue.offer(frame)
+            droppedFrames++
+        }
         if (phase != "live") setPhase("live", null)
+    }
+
+    /** Decodes and presents queued frames; late or stale pairs are dropped. */
+    private fun presentLoop() {
+        while (running.get()) {
+            val frame = try {
+                frameQueue.poll(100, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                return
+            } ?: continue
+            val signed = if (lastPresentedPts < 0) 0 else (frame.pts - lastPresentedPts).toInt()
+            if (lastPresentedPts >= 0 && signed < -20_000) {
+                lateFrames++
+                if (lateFrames <= 3) {
+                    Log.d(TAG, "drop late pair ${frame.seq} (${signed / 1000} ms)")
+                }
+                continue
+            }
+            val topBitmap = frame.top?.let { sink.decode(it) }
+            val bottomBitmap = frame.bottom?.let { sink.decode(it) }
+            if (topBitmap == null && bottomBitmap == null) {
+                if (framesPresented < 3) {
+                    Log.w(TAG, "pair ${frame.seq} decoded no bitmap "
+                        + "(top=${frame.top != null}, bottom=${frame.bottom != null})")
+                }
+                continue
+            }
+            sink.present(topBitmap, bottomBitmap, frame.topQuality, frame.bottomQuality)
+            lastPresentedPts = frame.pts
+            framesPresented++
+            if (framesPresented == 1L || framesPresented % 300L == 0L) {
+                Log.i(TAG, "presented=$framesPresented top=${topBitmap?.width}x${topBitmap?.height} "
+                    + "bottom=${bottomBitmap?.width}x${bottomBitmap?.height} q=${frame.topQuality} "
+                    + "late=$lateFrames dropped=$droppedFrames")
+            }
+        }
     }
 
     private fun recordRowSavings(pair: Assembler.Pair, top: ScreenResolver.Resolved?, bottom: ScreenResolver.Resolved?) {

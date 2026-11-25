@@ -29,14 +29,16 @@ class AudioPlayer {
         )
     }
 
-    private val queue = ArrayBlockingQueue<ShortArray>(12)
+    private val queue = ArrayBlockingQueue<ShortArray>(32)
     private val running = AtomicBoolean(false)
-    private var track: AudioTrack? = null
+
     private var thread: Thread? = null
     private var lastLeft = 0
     private var lastRight = 0
     private var carry = 0.0
-    private val resampled = ArrayList<Short>(512)
+    private var outputRate = OUTPUT_RATE
+    private var nativeRate = false
+    private var prefilled = false
 
     @Volatile var muted = false
     @Volatile var volume = 1f
@@ -49,12 +51,28 @@ class AudioPlayer {
 
     fun start() {
         if (running.getAndSet(true)) return
-        val minBuffer = AudioTrack.getMinBufferSize(
-            OUTPUT_RATE,
-            AudioFormat.CHANNEL_OUT_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        ).coerceAtLeast(4096)
-        val audioTrack = AudioTrack.Builder()
+        // Prefer the console's own rate so the system mixer does the resampling once.
+        val track = createTrack(SOURCE_RATE.toInt()) ?: createTrack(OUTPUT_RATE)
+        if (track == null) {
+            running.set(false)
+            return
+        }
+        track.play()
+        AudioTrackHolder.track = track
+        thread = Thread({ pump() }, "3ds-live-audio").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+    }
+
+    private fun createTrack(rate: Int): AudioTrack? {
+        return try {
+            val minBuffer = AudioTrack.getMinBufferSize(
+                rate,
+                AudioFormat.CHANNEL_OUT_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            ).coerceAtLeast(4096)
+            AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -64,20 +82,27 @@ class AudioPlayer {
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(OUTPUT_RATE)
+                    .setSampleRate(rate)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                     .build(),
             )
-            .setBufferSizeInBytes(minBuffer * 2)
+            .setBufferSizeInBytes(minBuffer * 4)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
-        track = audioTrack
-        audioTrack.play()
-        thread = Thread({ pump() }, "3ds-live-audio").apply {
-            priority = Thread.MAX_PRIORITY
-            start()
+            .also {
+                outputRate = rate
+                nativeRate = rate == SOURCE_RATE.toInt()
+                prefilled = false
+                carry = 0.0
+            }
+        } catch (_: Throwable) {
+            null
         }
+    }
+
+    private object AudioTrackHolder {
+        @Volatile var track: AudioTrack? = null
     }
 
     fun stop() {
@@ -85,7 +110,7 @@ class AudioPlayer {
         queue.clear()
         thread?.join(500)
         thread = null
-        track?.let {
+        AudioTrackHolder.track?.let {
             try {
                 it.pause()
                 it.flush()
@@ -94,7 +119,7 @@ class AudioPlayer {
             }
             it.release()
         }
-        track = null
+        AudioTrackHolder.track = null
     }
 
     fun reset() {
@@ -153,47 +178,70 @@ class AudioPlayer {
         lastLeft = l
         lastRight = r
         if (!running.get()) return
-        val resampledPcm = resample(pcm)
-        pcmSink?.invoke(resampledPcm)
-        if (!queue.offer(resampledPcm)) {
+        val out = if (nativeRate) pcm else resample(pcm)
+        pcmSink?.invoke(out)
+        if (!queue.offer(out)) {
             queue.poll()
-            queue.offer(resampledPcm)
+            queue.offer(out)
             droppedBlocks++
         }
     }
 
-    /** 160 frames at 32.728 kHz -> about 235 frames at 48 kHz, continuous across blocks. */
+    /**
+     * 160 frames at 32.728 kHz -> about 235 frames at 48 kHz.
+     *
+     * The phase is continuous across blocks: p may start slightly negative and is
+     * interpolated against the previous block's last sample, which keeps the stream
+     * free of the per-block click the old clamp produced.
+     */
     private fun resample(input: ShortArray): ShortArray {
-        val ratio = SOURCE_RATE / OUTPUT_RATE
-        resampled.clear()
-        var t = carry
-        while (true) {
-            val index = t.toInt()
-            if (index >= BLOCK_SAMPLES - 1) break
-            val frac = t - index
-            val left = input[index * 2]
-            val nextLeft = input[(index + 1) * 2]
-            val right = input[index * 2 + 1]
-            val nextRight = input[(index + 1) * 2 + 1]
-            resampled.add((left + (nextLeft - left) * frac).toInt().toShort())
-            resampled.add((right + (nextRight - right) * frac).toInt().toShort())
-            t += ratio
+        val ratio = SOURCE_RATE / outputRate
+        val out = ArrayList<Short>(300)
+        var p = carry
+        while (p < BLOCK_SAMPLES - 1) {
+            val index = kotlin.math.floor(p).toInt()
+            val frac = p - index
+            val left: Int
+            val right: Int
+            if (index < 0) {
+                val f = p + 1.0
+                left = (lastLeft + (input[0].toInt() - lastLeft) * f).toInt()
+                right = (lastRight + (input[1].toInt() - lastRight) * f).toInt()
+            } else {
+                val a = input[index * 2].toInt()
+                val b = input[(index + 1) * 2].toInt()
+                val c = input[index * 2 + 1].toInt()
+                val d = input[(index + 1) * 2 + 1].toInt()
+                left = (a + (b - a) * frac).toInt()
+                right = (c + (d - c) * frac).toInt()
+            }
+            out.add(left.coerceIn(-32768, 32767).toShort())
+            out.add(right.coerceIn(-32768, 32767).toShort())
+            p += ratio
         }
-        carry = t - BLOCK_SAMPLES
-        if (carry < 0) carry = 0.0
-        val out = ShortArray(resampled.size)
-        for (i in resampled.indices) out[i] = resampled[i]
-        return out
+        carry = p - BLOCK_SAMPLES
+        return ShortArray(out.size) { out[it] }
     }
 
     private fun pump() {
         while (running.get()) {
+            if (!prefilled) {
+                if (queue.size < 4) {
+                    try {
+                        Thread.sleep(5)
+                    } catch (_: InterruptedException) {
+                        return
+                    }
+                    continue
+                }
+                prefilled = true
+            }
             val pcm = try {
                 queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
             } catch (_: InterruptedException) {
                 return
             } ?: continue
-            val audioTrack = track ?: continue
+            val audioTrack = AudioTrackHolder.track ?: continue
             try {
                 audioTrack.setVolume(if (muted) 0f else volume)
                 audioTrack.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
