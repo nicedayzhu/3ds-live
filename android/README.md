@@ -46,6 +46,12 @@ Flutter (Dart)                          Kotlin (前台服务)
 | `StreamService.kt` | 前台服务与通知 |
 | `MainActivity.kt` | 通道接线、权限/服务启动、设置持久化 |
 
+## 与 PC 的互斥
+
+掌机同一时刻只连接一个接收端（协议只有单 peer）。PC 播放器与手机 App 各自都能独立接收，但同时开只有先应答的一方拿到画面；另一台会停在“正在寻找掌机”。切换时先在旧设备停止，掌机 4 秒租约到期后会重新广播。
+
+需要对外直播时不需要 Android 参与：在 PC 上用 OBS 采集播放器窗口（或让播放器 RTSP 推流到 RTSP 服务器，再用 OBS 媒体源拉取）。
+
 ## 构建与测试
 
 需要 Flutter 3.47.9（Dart 3.13.7）、Android SDK（platform 36）与 JDK 17：

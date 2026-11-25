@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../stream/models.dart';
@@ -15,6 +17,26 @@ class ConnectPage extends StatefulWidget {
 
 class _ConnectPageState extends State<ConnectPage> {
   bool _guideExpanded = true;
+  Timer? _slowSearchTimer;
+  bool _showBusyHint = false;
+
+  @override
+  void dispose() {
+    _slowSearchTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startSearch() {
+    final controller = context.live;
+    controller.start();
+    _slowSearchTimer?.cancel();
+    setState(() => _showBusyHint = false);
+    _slowSearchTimer = Timer(const Duration(seconds: 8), () {
+      if (!mounted) return;
+      if (controller.phase == StreamPhase.live) return;
+      setState(() => _showBusyHint = true);
+    });
+  }
 
   Future<void> _manualIpDialog() async {
     final controller = context.live;
@@ -97,12 +119,29 @@ class _ConnectPageState extends State<ConnectPage> {
                     tone: AppColors.warning,
                   ),
                 ),
+              if (_showBusyHint && !controller.isLive)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 12),
+                  child: NoticeBanner(
+                    text: '同一时刻只有一台设备能接收。若电脑端播放器正在投流，请先在电脑上停止，再回到这里重试。',
+                    icon: Icons.devices_other_rounded,
+                    tone: AppColors.warning,
+                  ),
+                ),
               StatusCard(
                 phase: controller.phase,
                 message: controller.message,
                 busy: controller.busy,
                 primaryLabel: running ? '停止接收' : '开始寻找掌机',
-                onPrimary: () => running ? controller.stop() : controller.start(),
+                onPrimary: () {
+                  if (running) {
+                    _slowSearchTimer?.cancel();
+                    setState(() => _showBusyHint = false);
+                    controller.stop();
+                  } else {
+                    _startSearch();
+                  }
+                },
                 secondaryLabel: '手动 IP…',
                 onSecondary: _manualIpDialog,
               ),

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../stream/live_controller.dart';
 import '../stream/models.dart';
 import '../theme/app_theme.dart';
 import 'diagnostics_page.dart';
@@ -22,10 +23,12 @@ class _LivePageState extends State<LivePage> {
   bool _locked = false;
   bool _zoom = false;
 
+  bool _systemUiApplied = false;
+  LiveController? _controller;
+
   @override
   void initState() {
     super.initState();
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.portraitUp,
       DeviceOrientation.landscapeLeft,
@@ -36,6 +39,19 @@ class _LivePageState extends State<LivePage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (!_systemUiApplied) {
+      _systemUiApplied = true;
+      final controller = context.live;
+      _controller = controller;
+      SystemChrome.setEnabledSystemUIMode(
+        controller.settings.hideSystemUi
+            ? SystemUiMode.immersiveSticky
+            : SystemUiMode.edgeToEdge,
+      );
+      if (controller.settings.keepAwake) {
+        controller.setScreenOn(true);
+      }
+    }
     _scheduleHide();
   }
 
@@ -43,6 +59,7 @@ class _LivePageState extends State<LivePage> {
   void dispose() {
     _hideTimer?.cancel();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _controller?.setScreenOn(false);
     super.dispose();
   }
 

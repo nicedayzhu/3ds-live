@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -87,6 +88,17 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "capture" -> result.success(engine?.capture())
+                "setKeepScreenOn" -> {
+                    val on = call.arguments as? Boolean ?: false
+                    runOnUiThread {
+                        if (on) {
+                            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        } else {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        }
+                    }
+                    result.success(null)
+                }
                 "loadSettings" -> result.success(
                     getSharedPreferences("3ds_live", MODE_PRIVATE)
                         .getString("settings", null),

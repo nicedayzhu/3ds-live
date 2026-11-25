@@ -110,6 +110,7 @@ class LiveController extends ChangeNotifier {
     }
     phase = StreamPhase.idle;
     message = null;
+    unawaited(setScreenOn(false));
     stats = const StreamStats();
     history = const [];
     notifyListeners();
@@ -144,6 +145,15 @@ class LiveController extends ChangeNotifier {
       await _bridge.saveSettings(jsonEncode(settings.toJson()));
     } on PlatformException catch (_) {
       // Persistence is best-effort; the engine keeps the live settings.
+    }
+  }
+
+  /// Keeps the display awake while the live view is in front.
+  Future<void> setScreenOn(bool on) async {
+    if (mockMode) return;
+    try {
+      await _bridge.setKeepScreenOn(on);
+    } on PlatformException catch (_) {
     }
   }
 

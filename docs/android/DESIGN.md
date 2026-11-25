@@ -3,6 +3,7 @@
 本文回答两个问题：Windows 播放器的哪些能力值得移植到 Android，以及移植后的应用结构、协议实现方式、性能预算与里程碑。界面规范见 [UI-SPEC.md](UI-SPEC.md)。
 
 - 目标平台：Android 9（API 28）及以上，手机为主，兼容平板/折叠屏横屏。
+- 范围边界：**同一时刻只有一个接收端**（掌机协议本身只认一个 peer）。PC 与 Android 各自都能独立当接收端，互斥使用；不做多设备同时收流、不做中继/网关。需要对外直播时，由 PC 端的 OBS 完成（窗口采集，或播放器 RTSP 推流到 RTSP 服务器后由 OBS 拉取）。
 - 设计基线：与 [cia-bridge](https://github.com/nicedayzhu/cia-bridge)、[game-format-studio](https://github.com/nicedayzhu/game-format-studio) 一致的定制 Material 3（Flutter）视觉，令牌见 UI-SPEC。
 - 定位：**口袋里的双屏接收器** —— 手机当第二块屏看 3DS，顺带录制与分享；不是 PC 端的完全替代。
 

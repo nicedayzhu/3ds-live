@@ -1,6 +1,7 @@
 package io.github.nicedayzhu.three_ds_live.stream
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import android.os.SystemClock
 import io.flutter.view.TextureRegistry
 import java.net.DatagramPacket
@@ -63,6 +64,7 @@ class StreamEngine(
     }
     private val audio = AudioPlayer()
     private val recorder = Recorder(context)
+    private var wifiLock: WifiManager.WifiLock? = null
     private val running = AtomicBoolean(false)
 
     private var socket: DatagramSocket? = null
@@ -159,6 +161,7 @@ class StreamEngine(
         sink.setLayout(VideoSink.Layout.from(settings.layout))
         audio.muted = settings.muted
         audio.volume = settings.volume
+        acquireWifiLock()
         audio.start()
         windowStart = SystemClock.elapsedRealtimeNanos()
         windowStarted = windowStart
@@ -191,6 +194,7 @@ class StreamEngine(
         socket?.close()
         socket = null
         audio.stop()
+        releaseWifiLock()
         sink.clear()
         peerIp = null
         peerPort = 0
@@ -252,6 +256,31 @@ class StreamEngine(
             events(mapOf("type" to "recording", "active" to false, "path" to path))
         }
         return path
+    }
+
+    private fun acquireWifiLock() {
+        if (wifiLock != null) return
+        try {
+            val manager = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+            wifiLock = manager.createWifiLock(
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "3ds-live:stream",
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Throwable) {
+            wifiLock = null
+        }
+    }
+
+    private fun releaseWifiLock() {
+        try {
+            wifiLock?.release()
+        } catch (_: Throwable) {
+        }
+        wifiLock = null
     }
 
     private fun even(value: Double): Int {
