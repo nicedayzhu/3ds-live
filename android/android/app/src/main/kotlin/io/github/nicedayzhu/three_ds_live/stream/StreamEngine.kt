@@ -849,7 +849,8 @@ class StreamEngine(
         )
         if (peerSupportsQuality) {
             sendBinary(
-                Wire.message(Wire.R16C, session, requestSeq, settings.fps, rate.requested, 1, settings.quality),
+                Wire.message(Wire.R16C, session, requestSeq, settings.fps, rate.requested, 1,
+                    settings.quality, screenMask()),
                 address,
                 peerPort,
             )

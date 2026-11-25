@@ -1024,11 +1024,13 @@ static void control(u64 *due) {
                 live_receiver_observe(&receiverFeedback,get32(msg+8),get32(msg+16),now,
                                       (u64)LIVE_PEER_LEASE_SECONDS*SYSCLOCK_ARM11);
             }
-            bool qualityConfig=n==28&&!memcmp(msg,"R16C",4);
+            bool qualityConfig=n>=28&&n<=32&&!memcmp(msg,"R16C",4);
             if(qualityConfig||(n==20&&!memcmp(msg,"R6CF",4))||(n==24&&!memcmp(msg,"R10C",4))) {
                 u32 seq=get32(msg+8),hz=get32(msg+12),bps=get32(msg+16);
                 bool nextCombined=n>=24?get32(msg+20)!=0:combinedFec;
                 unsigned targetQ=live_config_jpeg_target(msg,n,qualityTarget);
+                u32 requestedMask=n>=32?get32(msg+28):screenMask;
+                if(requestedMask<1||requestedMask>3)requestedMask=screenMask;
                 if(!live_valid_fps(hz)||bps<LIVE_MIN_RATE||bps>LIVE_MAX_RATE||!seq||
                    !live_valid_quality_target(targetQ))continue;
                 if(n>=24&&get32(msg+20)>1)continue;
@@ -1036,6 +1038,12 @@ static void control(u64 *due) {
                 peer_activity(now);
                 configSequence=seq;
                 LightLock_Lock(&lock);
+                if(requestedMask!=screenMask) {
+                    screenMask=requestedMask;
+                    while(pending.count)discard_pending(pending.head,TIMING_RECONFIGURED);
+                    bottomReuseSize=0;
+                    rowBase=rowCandidate=NULL;
+                }
                 configure_stream(hz,bps,nextCombined,targetQ);
                 LightLock_Unlock(&lock);lastStatusTick=0;
             }

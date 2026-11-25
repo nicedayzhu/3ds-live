@@ -772,7 +772,7 @@ void Receiver::run() {
             lastSentMask = config.mask;
             if (deviceQuality) {
                 socket.writeDatagram(message("R16C", {*current, request, quint32(freq), quint32(effective),
-                                                      1u, quint32(wireQuality)}), peer, remote);
+                                                      1u, quint32(wireQuality), quint32(requested.mask)}), peer, remote);
             } else if (splitSupported) {
                 socket.writeDatagram(message("R15C", {*current, request, quint32(freq), quint32(effective),
                                                      0u}), peer, remote);
