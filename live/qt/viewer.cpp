@@ -335,81 +335,121 @@ class Viewer final : public QWidget {
     void refreshCard(bool showHint = true) {
         if (!performanceCard || performanceCard->isHidden())
             return;
-        const auto method = snapshot["motion"].toString();
-        const QString motionName = method == "flow" ? "DIS 光流" : method == "rife" ? "RIFE AI" : "关闭";
-        QStringList rows{"直播性能   " + snapshot["time"].toString()};
+        auto esc = [](const QString &text) { return text.toHtmlEscaped(); };
+        auto number = [this](const QString &key, int decimals = 0, double divisor = 1.) {
+            return this->number(key, decimals, divisor);
+        };
+        QString html =
+            "<style>"
+            "table{border-collapse:collapse;}"
+            "td{padding:1px 0;font-size:12px;}"
+            ".title{color:#ffffff;font-size:13px;font-weight:600;padding-bottom:4px;}"
+            ".sec{color:#7f93a8;font-size:10px;letter-spacing:1px;padding-top:8px;padding-bottom:2px;}"
+            ".k{color:#aeb9c7;padding-right:14px;}"
+            ".v{color:#ffffff;font-family:Consolas,'Cascadia Mono',monospace;}"
+            ".note{color:#c7d0da;font-size:11px;padding-top:3px;}"
+            ".hint{color:#7f8b99;font-size:10px;padding-top:8px;}"
+            "</style><table width='100%' cellspacing='0' cellpadding='0'>";
+        auto section = [&](const QString &title) { html += "<tr><td colspan='2' class='sec'>" + esc(title) + "</td></tr>"; };
+        auto row = [&](const QString &key, const QString &value) {
+            html += "<tr><td class='k'>" + esc(key) + "</td><td class='v' align='right'>" + esc(value) + "</td></tr>";
+        };
+        auto note = [&](const QString &text) {
+            html += "<tr><td colspan='2' class='note'>" + esc(text) + "</td></tr>";
+        };
+        html += "<tr><td colspan='2' class='title'>直播性能 · " + esc(snapshot["time"].toString()) + "</td></tr>";
         const auto health = snapshot.value("frame_health").toObject();
         if (!health.isEmpty()) {
-            rows << (snapshot.value("connection") == "interrupted" ? QStringLiteral("收帧状态") :
-                                                                     QStringLiteral("掉帧观察 · 最近约 3 秒"));
+            section(snapshot.value("connection") == "interrupted" ? QStringLiteral("收帧状态") : QStringLiteral("掉帧观察"));
             for (const auto &line : health.value("evidence").toArray())
-                rows << line.toString();
+                note(line.toString());
         }
+        const auto method = snapshot["motion"].toString();
+        const QString motionName = method == "flow" ? "DIS 光流" : method == "rife" ? "RIFE AI" : "关闭";
         if (snapshot["connection"].toString() == "live") {
-            rows << QString("源帧 %1   ·   生成 %2   ·   合计 %3 FPS")
-                        .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1))
-                 << QString("运动补帧 %1   ·   缓冲 %2 ms").arg(motionName, number("playout_delay_ms"))
-                 << QString("掌机发送 %1 / 目标 %2 对/s   ·   上屏 %3 / 下屏 %4 FPS   ·   双屏收齐 %5")
-                        .arg(number("device_sent_fps", 1), number("requested_fps"),
-                             number("device_sent_top_fps", 1), number("device_sent_bottom_fps", 1),
-                             number("fps_received", 1))
-                 << QString("掌机编码 上 %1 / 下 %2 FPS")
-                        .arg(number("device_encoded_top_fps", 1), number("device_encoded_bottom_fps", 1))
-                 << QString("每对 %1 KB   ·   上屏编码 %2 ms   ·   下屏编码 %3 ms")
-                        .arg(number("pair_bytes", 1, 1024.), number("top_encode_us", 1, 1000.),
-                             number("bottom_encode_us", 1, 1000.))
-                 << QString("%1 %2   ·   掌机当前上限 %3 MB/s")
-                        .arg(snapshot.value("adaptive_rate").toBool(true) ? "自适应上限" : "固定上限",
-                             number("requested_rate", 2, 1e6), number("device_cap", 2, 1e6))
-                 << QString("掌机提交 %1   ·   PC 实收 %2 MB/s")
-                        .arg(number("device_media_bytes_per_s", 2, 1e6), number("bytes_per_s", 2, 1e6))
-                 << QString("上 / 下屏 JPEG Q  %1 / %2").arg(number("jpeg_top_q"), number("jpeg_bottom_q"))
-                 << QString("%1   ·   %2   ·   %3 ms").arg(quality->text(), snapshot["backend"].toString(), number("processing_ms", 1))
-                 << QString("本秒最长源帧间隔  %1 ms").arg(number("source_interval_max_gap_ms", 1));
+            section("帧率");
+            row("源帧 / 生成 / 合计", QString("%1 / %2 / %3 FPS")
+                    .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1)));
+            row("掌机发送 / 目标", QString("%1 / %2 对/s")
+                    .arg(number("device_sent_fps", 1), number("requested_fps")));
+            row("上屏 / 下屏发送", QString("%1 / %2 FPS")
+                    .arg(number("device_sent_top_fps", 1), number("device_sent_bottom_fps", 1)));
+            row("双屏收齐", number("fps_received", 1) + " FPS");
+            row("运动补帧 / 缓冲", QString("%1 / %2 ms").arg(motionName, number("playout_delay_ms")));
+            section("编码");
+            row("上屏 / 下屏编码", QString("%1 / %2 FPS")
+                    .arg(number("device_encoded_top_fps", 1), number("device_encoded_bottom_fps", 1)));
+            row("每对字节", number("pair_bytes", 1, 1024.) + " KB");
+            row("单帧编码耗时", QString("%1 / %2 ms")
+                    .arg(number("top_encode_us", 1, 1000.), number("bottom_encode_us", 1, 1000.)));
+            row("上 / 下屏 JPEG Q", number("jpeg_top_q") + " / " + number("jpeg_bottom_q"));
+            row("增强", QString("%1 · %2 · %3 ms")
+                    .arg(quality->text(), snapshot["backend"].toString(), number("processing_ms", 1)));
+            section("网络");
+            row(snapshot.value("adaptive_rate").toBool(true) ? "自适应上限" : "固定上限",
+                number("requested_rate", 2, 1e6) + " MB/s");
+            row("掌机提交 / PC 实收", QString("%1 / %2 MB/s")
+                    .arg(number("device_media_bytes_per_s", 2, 1e6), number("bytes_per_s", 2, 1e6)));
+            row("掌机当前上限", number("device_cap", 2, 1e6) + " MB/s");
+            row("本秒最长源帧间隔", number("source_interval_max_gap_ms", 1) + " ms");
+            if (snapshot.contains("jpeg_header_saving_pct"))
+                row("JPEG 表头累计节省", QString("%1 MB (%2%)")
+                        .arg(number("jpeg_header_saved_bytes", 1, 1000000.), number("jpeg_header_saving_pct", 1)));
+            section("呈现");
+            row("真实更新 上 / 下", QString("%1 / %2 FPS")
+                    .arg(number("fps_top_presented", 1), number("fps_bottom_presented", 1)));
+            row("上屏 >100 ms", QString("%1 次 · 最长 %2 ms")
+                    .arg(number("top_gaps_over_100ms"), number("top_max_gap_ms", 1)));
+            row("下屏 >100 ms", QString("%1 次 · 最长 %2 ms")
+                    .arg(number("bottom_gaps_over_100ms"), number("bottom_max_gap_ms", 1)));
+            if (snapshot.contains("captured_top_fps"))
+                row("掌机采集 上 / 下", QString("%1 / %2 FPS")
+                        .arg(number("captured_top_fps", 1), number("captured_bottom_fps", 1)));
+            if (method == "flow")
+                row("光流保护跳过", number("motion_quality_holds") + " 对");
             const auto jpeg = jpegStatus();
             if (!jpeg.isEmpty())
-                rows << jpeg;
-            if (snapshot.contains("jpeg_header_saving_pct"))
-                rows << QString("JPEG 表头精简累计省 %1 MB（%2%）")
-                            .arg(number("jpeg_header_saved_bytes", 1, 1000000.), number("jpeg_header_saving_pct", 1));
-            if (snapshot.contains("fps_top_presented")) {
-                rows << QString("真实更新 上 %1 · 下 %2 FPS").arg(number("fps_top_presented", 1), number("fps_bottom_presented", 1));
-                rows << QString("上屏 >100 ms %1 次 · 最长 %2 ms").arg(number("top_gaps_over_100ms"), number("top_max_gap_ms", 1));
-                rows << QString("下屏 >100 ms %1 次 · 最长 %2 ms").arg(number("bottom_gaps_over_100ms"), number("bottom_max_gap_ms", 1));
-            }
-            if (snapshot.contains("captured_top_fps"))
-                rows << QString("掌机采集 上 / 下  %1 / %2 FPS").arg(number("captured_top_fps", 1), number("captured_bottom_fps", 1));
-            if (method == "flow")
-                rows << QString("光流保护累计跳过 %1 对").arg(number("motion_quality_holds"));
+                note(jpeg);
         } else {
-            rows << status->text();
+            note(status->text());
         }
         if (method == "rife") {
+            section("补帧");
             const QString requested = snapshot["rife_precision"].toString() == "fp16" ? "FP16" : "FP32";
             QString backend = snapshot["motion_backend"].toString();
             if (backend == "DirectML") backend = QStringLiteral("DirectML FP32");
             QString state = QStringLiteral("等待推理");
             if (!snapshot["motion_error"].toString().isEmpty())
-                state = QStringLiteral("推理失败   ·   F12 查看原因");
+                state = QStringLiteral("推理失败 · F12 查看原因");
             else if (!backend.isEmpty())
-                state = QString("实际 %1   ·   %2 ms").arg(backend, number("motion_processing_ms", 1));
-            rows << QString("RIFE 设置 %1   ·   %2").arg(requested, state);
+                state = QString("%1 · %2 ms").arg(backend, number("motion_processing_ms", 1));
+            row("RIFE 设置", requested);
+            row("RIFE 状态", state);
             if (!backend.isEmpty() && !snapshot["motion_backend_fallback"].toString().isEmpty())
-                rows << QStringLiteral("RIFE 已回退   ·   F12 查看原因");
+                note("RIFE 已回退 · F12 查看原因");
         }
         if (showHint) {
-            rows << (effectSettings && effectSettings->isVisible() ? QStringLiteral("右键性能按钮打开「画面与补帧」或复制截图")
-                                                 : QStringLiteral("点击性能按钮固定   ·   右键复制截图"));
+            html += "<tr><td colspan='2' class='hint'>" +
+                    esc(effectSettings && effectSettings->isVisible()
+                            ? QStringLiteral("右键性能按钮打开「画面与补帧」或复制截图")
+                            : QStringLiteral("点击性能按钮固定 · 右键复制截图")) +
+                    "</td></tr>";
         }
-        performanceCard->setText(rows.join('\n'));
-        int natural = 0;
-        for (const auto &row : rows)
-            natural = std::max(natural, performanceCard->fontMetrics().horizontalAdvance(row));
-        const int width = std::min(natural + 22, std::max(1, canvas->width() - 12));
-        performanceCard->setFixedSize(width, performanceCard->heightForWidth(width));
-        performanceCard->move(canvas->width()-performanceCard->width()-6, std::max(0,canvas->height()-performanceCard->height()-6));
+        html += "</table>";
+        performanceCard->setTextFormat(Qt::RichText);
+        performanceCard->setText(html);
+        performanceCard->setWordWrap(true);
+        const int width = std::min(340, std::max(1, canvas->width() - 12));
+        performanceCard->setFixedWidth(width);
+        int height = performanceCard->heightForWidth(width);
+        if (height <= 0) height = performanceCard->sizeHint().height();
+        height = std::min(height, std::max(1, canvas->height() - 12));
+        performanceCard->setFixedSize(width, height);
+        performanceCard->move(canvas->width() - performanceCard->width() - 6,
+                              std::max(0, canvas->height() - performanceCard->height() - 6));
         performanceCard->raise();
     }
+
     void showCard(bool visible) {
         performanceCard->setVisible(visible);
         refreshCard();
