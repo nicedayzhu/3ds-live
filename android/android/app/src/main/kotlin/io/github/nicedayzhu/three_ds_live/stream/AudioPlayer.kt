@@ -40,6 +40,19 @@ class AudioPlayer {
     private var nativeRate = false
     private var prefilled = false
 
+    // Small reorder window: UDP can deliver R9A1 packets out of order and a missing
+    // block must be concealed instead of being skipped abruptly.
+    private val pending = java.util.TreeMap<Int, ShortArray>()
+    private var expectedBlock = Int.MIN_VALUE
+    private var lastPcm: ShortArray? = null
+    private var fadeInNext = false
+    private var gaps = 0L
+    private var reordered = 0L
+    private var underruns = 0L
+    private var lastUnderrun = 0
+    private var peakQueue = 0
+    private var appliedVolume = -1f
+
     @Volatile var muted = false
     @Volatile var volume = 1f
     @Volatile var pcmSink: ((ShortArray) -> Unit)? = null
@@ -59,6 +72,11 @@ class AudioPlayer {
         }
         track.play()
         AudioTrackHolder.track = track
+        Logs.i(
+            "3ds-live",
+            "audio track rate=${track.sampleRate} frames=${track.bufferSizeInFrames} " +
+                "native=$nativeRate",
+        )
         thread = Thread({ pump() }, "3ds-live-audio").apply {
             priority = Thread.MAX_PRIORITY
             start()
@@ -124,15 +142,24 @@ class AudioPlayer {
 
     fun reset() {
         queue.clear()
+        pending.clear()
+        expectedBlock = Int.MIN_VALUE
+        lastPcm = null
+        fadeInNext = false
         blocksPlayed = 0
         droppedBlocks = 0
+        gaps = 0
+        reordered = 0
+        underruns = 0
+        peakQueue = 0
+        appliedVolume = -1f
         lastLeft = 0
         lastRight = 0
         carry = 0.0
     }
 
     /** Decodes one 167-byte IMA record into the playout queue. */
-    fun submitRecord(record: ByteArray, offset: Int, length: Int, nowNanos: Long) {
+    fun submitRecord(blockSeq: Int, record: ByteArray, offset: Int, length: Int, nowNanos: Long) {
         if (length < 167) return
         val leftSample = ((record[offset].toInt() and 0xFF) or (record[offset + 1].toInt() shl 8)).toShort().toInt()
         val leftIndex = record[offset + 2].toInt() and 0xFF
@@ -175,16 +202,82 @@ class AudioPlayer {
             pcm[(i + 1) * 2] = l.toShort()
             pcm[(i + 1) * 2 + 1] = r.toShort()
         }
-        lastLeft = l
-        lastRight = r
         if (!running.get()) return
-        val out = if (nativeRate) pcm else resample(pcm)
+        dispatch(blockSeq, pcm)
+    }
+
+    /** Orders blocks, conceals gaps and hands contiguous PCM to the player. */
+    private fun dispatch(blockSeq: Int, pcm: ShortArray) {
+        if (expectedBlock == Int.MIN_VALUE) expectedBlock = blockSeq
+        val delta = blockSeq - expectedBlock
+        if (delta < 0) {
+            reordered++
+            return
+        }
+        if (pending.containsKey(blockSeq)) return
+        if (delta > 64) {
+            // Long gap (session restart or heavy loss): jump forward.
+            pending.clear()
+            expectedBlock = blockSeq
+            gaps++
+        }
+        pending[blockSeq] = pcm
+        if (pending.size > 8) {
+            val target = pending.firstKey()
+            while (expectedBlock < target) {
+                emit(conceal())
+                fadeInNext = true
+                expectedBlock++
+                gaps++
+            }
+        }
+        while (true) {
+            val next = pending.remove(expectedBlock) ?: break
+            emit(next)
+            expectedBlock++
+        }
+    }
+
+    private fun emit(pcm: ShortArray) {
+        val input = if (fadeInNext) {
+            fadeInNext = false
+            fadeIn(pcm)
+        } else {
+            pcm
+        }
+        val out = if (nativeRate) input else resample(input)
+        lastLeft = input[(BLOCK_SAMPLES - 1) * 2].toInt()
+        lastRight = input[(BLOCK_SAMPLES - 1) * 2 + 1].toInt()
+        lastPcm = input
         pcmSink?.invoke(out)
         if (!queue.offer(out)) {
             queue.poll()
             queue.offer(out)
             droppedBlocks++
         }
+        if (queue.size > peakQueue) peakQueue = queue.size
+    }
+
+    /** Fades the previous block out so a lost block does not end in a hard step. */
+    private fun conceal(): ShortArray {
+        val last = lastPcm ?: return ShortArray(BLOCK_SAMPLES * 2)
+        val copy = last.copyOf()
+        for (i in 0 until BLOCK_SAMPLES) {
+            val gain = (BLOCK_SAMPLES - i).toFloat() / BLOCK_SAMPLES
+            copy[i * 2] = (copy[i * 2] * gain).toInt().toShort()
+            copy[i * 2 + 1] = (copy[i * 2 + 1] * gain).toInt().toShort()
+        }
+        return copy
+    }
+
+    private fun fadeIn(pcm: ShortArray): ShortArray {
+        val frames = minOf(64, BLOCK_SAMPLES)
+        for (i in 0 until frames) {
+            val gain = i.toFloat() / frames
+            pcm[i * 2] = (pcm[i * 2] * gain).toInt().toShort()
+            pcm[i * 2 + 1] = (pcm[i * 2 + 1] * gain).toInt().toShort()
+        }
+        return pcm
     }
 
     /**
@@ -246,6 +339,19 @@ class AudioPlayer {
                 audioTrack.setVolume(if (muted) 0f else volume)
                 audioTrack.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
                 blocksPlayed++
+                if (blocksPlayed % 200L == 0L) {
+                    val totalUnderruns = try { audioTrack.underrunCount } catch (_: Throwable) { 0 }
+                    if (totalUnderruns > lastUnderrun) {
+                        underruns += (totalUnderruns - lastUnderrun).toLong()
+                        lastUnderrun = totalUnderruns
+                    }
+                    Logs.i(
+                        "3ds-live",
+                        "audio blocks=$blocksPlayed queue=${queue.size} peak=$peakQueue " +
+                            "gaps=$gaps reordered=$reordered dropped=$droppedBlocks " +
+                            "underruns=$underruns",
+                    )
+                }
             } catch (_: Throwable) {
                 return
             }

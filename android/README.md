@@ -59,6 +59,7 @@ $adb = 'F:\work\music_online_apk\.toolchains\android-sdk\platform-tools\adb.exe'
 - **PC 单独接收**：先停掉手机端，运行 `dist/Windows/3DS-Live.exe`，按 `F12` 看对齐窗口。
 - **互斥**：两端同时开只有一台拿到画面，另一台 8 秒后出现提示；停掉接收端后，另一台在 4–8 秒内接管。
 - **录制**：直播页 ⏺ → 停止，Android 10+ 在相册 `Movies/3DS Live`；PC 用 `Ctrl+R`。
+- **没有 adb 时排错**：诊断页右上角「文件」图标导出运行日志，保存到 `下载/3DS Live/3ds-live-log-<时间>.txt`，可直接用 LocalSend 发送。日志包含发现、呈现、音频（采样率、缓冲、欠载、丢块、乱序、隐藏）与崩溃堆栈。
 
 ## 与 PC 的互斥
 

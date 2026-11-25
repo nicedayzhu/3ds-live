@@ -5,7 +5,6 @@ import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import io.flutter.view.TextureRegistry
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -201,17 +200,17 @@ class StreamEngine(
             try {
                 datagramSocket.broadcast = true
             } catch (error: Throwable) {
-                Log.w(TAG, "SO_BROADCAST unavailable: ${error.message}")
+                Logs.w(TAG, "SO_BROADCAST unavailable: ${error.message}")
             }
             socket = datagramSocket
         } catch (error: Throwable) {
             running.set(false)
             audio.stop()
-            Log.e(TAG, "bind udp ${settings.port} failed: ${error.message}")
+            Logs.e(TAG, "bind udp ${settings.port} failed: ${error.message}")
             setPhase("error", "无法监听 UDP ${settings.port}：${error.message}")
             return
         }
-        Log.i(TAG, "started on udp ${settings.port}, layout=${settings.layout}, "
+        Logs.i(TAG, "started on udp ${settings.port}, layout=${settings.layout}, "
             + "fps=${settings.fps}, rate=${settings.rate}, quality=${settings.quality}")
         setPhase("inviting", null)
         frameQueue.clear()
@@ -243,7 +242,7 @@ class StreamEngine(
         session = 0
         resolver.reset()
         assembler.reset()
-        Log.i(TAG, "stopped")
+        Logs.i(TAG, "stopped")
         setPhase("idle", null)
     }
 
@@ -284,9 +283,9 @@ class StreamEngine(
         try {
             sink.forceRefresh()
         } catch (error: Throwable) {
-            Log.w(TAG, "surface force refresh failed: ${error.message}")
+            Logs.w(TAG, "surface force refresh failed: ${error.message}")
         }
-        if (first) Log.i(TAG, "live view attached, texture=${sink.textureId}")
+        if (first) Logs.i(TAG, "live view attached, texture=${sink.textureId}")
     }
 
     fun capture(): String? = sink.capture()
@@ -297,7 +296,7 @@ class StreamEngine(
         val scale = if (settings.recordResolution == "1080p") 1.5 else 1.0
         val width = even(sink.layout.width * scale)
         val height = even(sink.layout.height * scale)
-        Log.i(TAG, "recording ${width}x$height at ${settings.recordBitrate} bps")
+        Logs.i(TAG, "recording ${width}x$height at ${settings.recordBitrate} bps")
         val path = recorder.start(width, height, settings.recordBitrate, withAudio = !settings.muted)
         if (path != null) {
             sink.setRecordSurface(recorder.surface)
@@ -313,7 +312,7 @@ class StreamEngine(
         sink.setRecordSurface(null)
         audio.pcmSink = null
         if (wasRecording) {
-            Log.i(TAG, "recording stopped: $path")
+            Logs.i(TAG, "recording stopped: $path")
             events(mapOf("type" to "recording", "active" to false, "path" to path))
         }
         return path
@@ -376,7 +375,7 @@ class StreamEngine(
             } catch (error: Throwable) {
                 // A malformed datagram must never kill the receive loop.
                 if (parseFailures < 3) {
-                    Log.w(TAG, "datagram ${packet.length}B tag=${Wire.tag(packet.data, packet.length)}: ${error.message}")
+                    Logs.w(TAG, "datagram ${packet.length}B tag=${Wire.tag(packet.data, packet.length)}: ${error.message}")
                     parseFailures++
                 }
             }
@@ -418,7 +417,7 @@ class StreamEngine(
         val selected = peerIp
         if (selected != null && selected != address) return
         if (session != 0 && replySession != session && phase == "live") return
-        Log.i(TAG, "3DLS from $address:$port session=${replySession.toString(16)} "
+        Logs.i(TAG, "3DLS from $address:$port session=${replySession.toString(16)} "
             + "challenge=${replyChallenge.toString(16)}")
         peerIp = address
         peerPort = port
@@ -430,7 +429,7 @@ class StreamEngine(
         lastPeerSeen = now
         val ack = Wire.message(Wire.DISCOVERY_INVITE_REPLY, replySession, replyChallenge)
         if (!sendBinary(ack, address, port)) {
-            Log.w(TAG, "3DLA to $address:$port failed")
+            Logs.w(TAG, "3DLA to $address:$port failed")
         }
         if (phase == "inviting" || phase == "lost") setPhase("reserved", null)
         emitDevices()
@@ -439,6 +438,7 @@ class StreamEngine(
     private fun onNewSession() {
         assembler.reset()
         resolver.reset()
+        audio.reset()
         appliedQuality = 0
         deviceAppliedQuality = 0
         deviceQualitySeen.clear()
@@ -496,7 +496,7 @@ class StreamEngine(
         for (i in 0 until count) {
             val block = Wire.int(data, offset)
             if (seenAudio.add(block)) {
-                audio.submitRecord(data, offset + 8, Wire.RECORD_R9A1 - 8, now)
+                audio.submitRecord(block, data, offset + 8, Wire.RECORD_R9A1 - 8, now)
                 audioBlocks++
             }
             offset += Wire.RECORD_R9A1
@@ -642,7 +642,7 @@ class StreamEngine(
             if (lastPresentedPts >= 0 && signed < -20_000) {
                 lateFrames++
                 if (lateFrames <= 3) {
-                    Log.d(TAG, "drop late pair ${frame.seq} (${signed / 1000} ms)")
+                    Logs.d(TAG, "drop late pair ${frame.seq} (${signed / 1000} ms)")
                 }
                 continue
             }
@@ -650,7 +650,7 @@ class StreamEngine(
             val bottomBitmap = frame.bottom?.let { sink.decode(it) }
             if (topBitmap == null && bottomBitmap == null) {
                 if (framesPresented < 3) {
-                    Log.w(TAG, "pair ${frame.seq} decoded no bitmap "
+                    Logs.w(TAG, "pair ${frame.seq} decoded no bitmap "
                         + "(top=${frame.top != null}, bottom=${frame.bottom != null})")
                 }
                 continue
@@ -659,12 +659,12 @@ class StreamEngine(
             lastPresentedPts = frame.pts
             framesPresented++
             if (framesPresented == 1L || framesPresented % 300L == 0L) {
-                Log.i(TAG, "presented=$framesPresented top=${topBitmap?.width}x${topBitmap?.height} "
+                Logs.i(TAG, "presented=$framesPresented top=${topBitmap?.width}x${topBitmap?.height} "
                     + "bottom=${bottomBitmap?.width}x${bottomBitmap?.height} q=${frame.topQuality} "
                     + "late=$lateFrames dropped=$droppedFrames")
             }
             } catch (error: Throwable) {
-                Log.e(TAG, "present failed: ${error.message}", error)
+                Logs.e(TAG, "present failed: ${error.message}", error)
                 events(mapOf("type" to "error", "message" to "画面呈现失败：${error.message}"))
             }
         }
@@ -701,7 +701,7 @@ class StreamEngine(
         if (peerSupportsRepair <= 0 || indices.isEmpty()) return
         if (indices.size > peerSupportsRepair) return
         repairRequests++
-        Log.d(TAG, "repair seq=$seq indices=${indices.joinToString(",")}")
+        Logs.d(TAG, "repair seq=$seq indices=${indices.joinToString(",")}")
         val buffer = java.nio.ByteBuffer.allocate(20 + indices.size)
             .order(java.nio.ByteOrder.LITTLE_ENDIAN)
         buffer.put(Wire.R19N.toByteArray(Charsets.US_ASCII))
@@ -780,7 +780,7 @@ class StreamEngine(
             sent++
         } catch (error: Throwable) {
             if (broadcastFailures < 3) {
-                Log.w(TAG, "limited broadcast failed: ${error.message}")
+                Logs.w(TAG, "limited broadcast failed: ${error.message}")
                 broadcastFailures++
             }
         }
@@ -796,7 +796,7 @@ class StreamEngine(
             }
         }
         if (broadcastFailures < 3) {
-            Log.d(TAG, "3DLP invitations sent=$sent")
+            Logs.d(TAG, "3DLP invitations sent=$sent")
         }
     }
 
@@ -862,7 +862,7 @@ class StreamEngine(
             true
         } catch (error: Throwable) {
             if (broadcastFailures < 3) {
-                Log.w(TAG, "send to $address:$port failed: ${error.message}")
+                Logs.w(TAG, "send to $address:$port failed: ${error.message}")
                 broadcastFailures++
             }
             false
@@ -875,7 +875,7 @@ class StreamEngine(
         if (phase == next && message == note) return
         phase = next
         message = note
-        Log.i(TAG, "phase=$next${if (note != null) " note=$note" else ""}")
+        Logs.i(TAG, "phase=$next${if (note != null) " note=$note" else ""}")
         emitState()
     }
 

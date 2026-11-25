@@ -11,7 +11,6 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
 import android.view.Surface
 import io.flutter.view.TextureRegistry
 import java.io.File
@@ -91,9 +90,9 @@ class VideoSink(
             producer.setSize(layout.width, layout.height)
             surface = producer.getForcedNewSurface()
             lockFailures = 0
-            Log.i("3ds-live", "texture surface ${layout.width}x${layout.height} created")
+            Logs.i("3ds-live", "texture surface ${layout.width}x${layout.height} created")
         } catch (error: Throwable) {
-            Log.w("3ds-live", "texture surface create failed: ${error.message}")
+            Logs.w("3ds-live", "texture surface create failed: ${error.message}")
         }
     }
 
@@ -125,7 +124,7 @@ class VideoSink(
         } catch (error: Throwable) {
             lockFailures++
             if (lockFailures <= 2) {
-                Log.w("3ds-live", "texture lockCanvas failed (${lockFailures}): ${error.message}")
+                Logs.w("3ds-live", "texture lockCanvas failed (${lockFailures}): ${error.message}")
             }
             return
         }
