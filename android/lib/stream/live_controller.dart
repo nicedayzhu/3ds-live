@@ -225,6 +225,15 @@ class LiveController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<String?> exportLog() async {
+    if (mockMode) return null;
+    try {
+      return await _bridge.exportLog();
+    } on PlatformException catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>?> exportDiagnostics() async {
     if (mockMode) {
       return {

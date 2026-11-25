@@ -29,6 +29,8 @@ class StreamBridge {
 
   Future<void> viewAttached() => _method.invokeMethod<void>('viewAttached');
 
+  Future<String?> exportLog() => _method.invokeMethod<String>('exportLog');
+
   Future<void> setKeepScreenOn(bool on) =>
       _method.invokeMethod<void>('setKeepScreenOn', on);
 

@@ -184,6 +184,19 @@ class SettingsPage extends StatelessWidget {
         ]),
         _Section(title: '高级', children: [
           SettingsRow(
+            title: '导出运行日志',
+            subtitle: '保存到“下载/3DS Live”，可直接用 LocalSend 发送',
+            onTap: () async {
+              final path = await controller.exportLog();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(path == null ? '日志导出失败' : '日志已保存到 $path'),
+                ),
+              );
+            },
+          ),
+          SettingsRow(
             title: '清除最近使用的掌机',
             danger: true,
             onTap: () {
