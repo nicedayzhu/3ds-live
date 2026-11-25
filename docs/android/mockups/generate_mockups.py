@@ -1,0 +1,455 @@
+"""Generate static HTML mockups for the 3DS Live Android design spec.
+
+The mockups use the exact tokens from docs/android/UI-SPEC.md and are rasterized
+with headless Edge (see make_mockups.ps1). They are design references, not code.
+"""
+
+from __future__ import annotations
+
+import pathlib
+import textwrap
+
+OUT = pathlib.Path(__file__).resolve().parent
+
+FONT = "'Noto Sans SC', 'Microsoft YaHei', 'PingFang SC', sans-serif"
+
+BASE_CSS = f"""
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; padding: 0; }}
+body {{
+  width: 412px; height: 915px; overflow: hidden;
+  font-family: {FONT};
+  background: var(--canvas); color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}}
+body.dark {{ background: #000; color: #EAF5F2; }}
+:root {{
+  --canvas: #F7F8FC; --surface: #FFFFFF; --surface-high: #F1F3F8;
+  --soft: #F3F5FA; --ink: #1C2030; --muted: #73798C; --line: #E7E9F2;
+  --primary: #238E82; --primary-soft: #E7F1ED; --secondary: #5268F2;
+  --success: #2CAF7A; --warning: #E19B39; --danger: #D65757;
+  --blue: #3D7BF7; --amber: #E8A33D; --green: #35C07A; --red: #E05A5A;
+}}
+.phone {{ width: 412px; height: 915px; display: flex; flex-direction: column; }}
+.statusbar {{
+  height: 26px; flex: 0 0 26px; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 18px; font-size: 11px;
+  font-weight: 600; color: var(--ink); letter-spacing: .2px;
+}}
+.statusbar .icons {{ display: flex; gap: 5px; align-items: center; opacity: .8; }}
+.statusbar .icons i {{ width: 12px; height: 8px; border: 1px solid currentColor;
+  border-radius: 2px; display: inline-block; }}
+.topbar {{
+  height: 56px; flex: 0 0 56px; display: flex; align-items: center;
+  padding: 0 16px; gap: 10px;
+}}
+.logo {{
+  width: 28px; height: 28px; border-radius: 8px; background: var(--secondary);
+  color: #fff; font-size: 8.5px; font-weight: 800; letter-spacing: .2px;
+  display: flex; align-items: center; justify-content: center; flex: 0 0 28px;
+}}
+.title {{ font-size: 17px; font-weight: 700; letter-spacing: -.2px; }}
+.spacer {{ flex: 1; }}
+.iconbtn {{
+  width: 40px; height: 40px; border-radius: 12px; display: flex;
+  align-items: center; justify-content: center; color: var(--ink);
+}}
+.content {{ flex: 1; padding: 4px 16px 0; overflow: hidden; }}
+.card {{
+  background: var(--surface); border-radius: 16px; padding: 16px;
+  box-shadow: inset 0 0 0 1px var(--line);
+}}
+.status-card {{ padding: 16px; }}
+.status-line {{ display: flex; align-items: center; gap: 8px; }}
+.dot {{ width: 10px; height: 10px; border-radius: 50%; flex: 0 0 10px; }}
+.dot.amber {{ background: var(--amber); box-shadow: 0 0 0 4px rgba(232,163,61,.18); }}
+.dot.green {{ background: var(--green); box-shadow: 0 0 0 4px rgba(53,192,122,.18); }}
+.dot.blue  {{ background: var(--blue);  box-shadow: 0 0 0 4px rgba(61,123,247,.16); }}
+.status-title {{ font-size: 17px; font-weight: 700; letter-spacing: -.2px; }}
+.body {{ margin: 10px 0 16px; font-size: 14px; line-height: 1.5; color: var(--muted); }}
+.body b {{ color: var(--ink); font-weight: 600; }}
+.actions {{ display: flex; gap: 10px; }}
+.btn {{
+  height: 48px; border-radius: 14px; border: 0; font-size: 14px;
+  font-weight: 700; font-family: inherit; display: flex; align-items: center;
+  justify-content: center; gap: 6px;
+}}
+.btn.primary {{ background: var(--primary); color: #fff; flex: 1.15; }}
+.btn.outline {{ background: transparent; color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line); flex: 1; }}
+.section {{
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin: 24px 0 10px;
+}}
+.section h2 {{ margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.2px; }}
+.section .count {{ font-size: 12px; color: var(--muted); }}
+.device {{ display: flex; align-items: center; gap: 12px; padding: 16px; margin-bottom: 10px; }}
+.device .tile {{
+  width: 40px; height: 40px; border-radius: 12px; background: var(--primary-soft);
+  color: var(--primary); font-size: 9px; font-weight: 800; letter-spacing: .2px;
+  display: flex; align-items: center; justify-content: center; flex: 0 0 40px;
+}}
+.device .name {{ font-size: 15px; font-weight: 600; letter-spacing: -.1px; }}
+.device .meta {{ margin-top: 3px; font-size: 12px; color: var(--muted); }}
+.chev {{ margin-left: auto; color: var(--muted); display: flex; }}
+.recent .name {{ font-size: 14px; font-weight: 500; }}
+.guide {{ margin-top: 24px; padding: 16px; }}
+.guide h3 {{ margin: 0; font-size: 14px; font-weight: 700; }}
+.guide ol {{ margin: 10px 0 0; padding: 0; list-style: none; }}
+.guide li {{
+  display: flex; gap: 10px; align-items: flex-start; font-size: 12px;
+  line-height: 1.5; color: var(--muted); margin-top: 8px;
+}}
+.guide li span.n {{
+  width: 20px; height: 20px; border-radius: 50%; background: var(--surface-high);
+  color: var(--ink); font-size: 11px; font-weight: 700; display: flex;
+  align-items: center; justify-content: center; flex: 0 0 20px;
+}}
+.nav {{
+  flex: 0 0 64px; height: 64px; background: var(--surface);
+  box-shadow: inset 0 1px 0 var(--line); display: flex; padding: 0 8px;
+}}
+.nav .item {{
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 3px; color: var(--muted); font-size: 11px;
+  font-weight: 600;
+}}
+.nav .item.on {{ color: var(--primary); }}
+/* live */
+.live {{ background: #000; color: #fff; position: relative; }}
+.live .hud {{
+  position: absolute; left: 0; right: 0; top: 0; height: 116px;
+  background: linear-gradient(180deg, rgba(11,15,20,.92) 0%, rgba(11,15,20,.55) 55%, rgba(11,15,20,0) 100%);
+  padding: 26px 12px 0; display: flex; align-items: flex-start; gap: 8px;
+}}
+.live .hud .row {{ display: flex; align-items: center; gap: 8px; width: 100%; }}
+.hud .back {{ width: 40px; height: 40px; display: flex; align-items: center;
+  justify-content: center; color: #fff; }}
+.pill {{
+  display: inline-flex; align-items: center; gap: 7px; height: 32px;
+  padding: 0 12px; border-radius: 99px; background: rgba(255,255,255,.14);
+  font-size: 12px; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums;
+}}
+.pill .dot {{ width: 6px; height: 6px; box-shadow: 0 0 0 3px rgba(53,192,122,.22); }}
+.hud .tools {{ margin-left: auto; display: flex; gap: 2px; }}
+.icircle {{ width: 40px; height: 40px; border-radius: 12px; display: flex;
+  align-items: center; justify-content: center; color: #fff; }}
+.stage {{ position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; padding: 96px 8px 96px; }}
+.screen {{
+  width: 388px; background: #0F1115; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
+  border-radius: 2px; display: flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,.34); font-size: 12px; letter-spacing: .2px;
+}}
+.screen.top {{ height: 232.8px; }}
+.screen.bottom {{ height: 291px; }}
+.dock {{
+  position: absolute; left: 0; right: 0; bottom: 0; height: 128px;
+  background: linear-gradient(0deg, rgba(11,15,20,.95) 0%, rgba(11,15,20,.72) 62%, rgba(11,15,20,0) 100%);
+  display: flex; flex-direction: column; justify-content: flex-end;
+  padding: 0 12px 16px; gap: 10px;
+}}
+.dock .chips {{ display: flex; gap: 8px; }}
+.chip {{
+  height: 34px; padding: 0 14px; border-radius: 99px; font-size: 12px;
+  font-weight: 700; color: rgba(255,255,255,.78); background: rgba(255,255,255,.10);
+  display: flex; align-items: center;
+}}
+.chip.on {{ color: #78D7C7; background: rgba(120,215,199,.14);
+  box-shadow: inset 0 0 0 1px rgba(120,215,199,.55); }}
+.dock .row {{ display: flex; align-items: center; gap: 4px; }}
+.dock .row .spacer {{ flex: 1; }}
+.record {{ color: #FF8A80; }}
+.badge-rec {{
+  position: absolute; top: 40px; right: 14px; height: 26px; padding: 0 10px;
+  border-radius: 99px; background: rgba(224,90,90,.18); color: #FFB4AB;
+  font-size: 11px; font-weight: 700; display: flex; align-items: center;
+  gap: 6px; font-variant-numeric: tabular-nums;
+}}
+/* sheet */
+.sheet-scene {{ position: relative; height: 915px; background: #000; }}
+.sheet-backdrop {{ position: absolute; inset: 0; background: rgba(0,0,0,.32); }}
+.sheet {{
+  position: absolute; left: 0; right: 0; bottom: 0; height: 604px;
+  background: #10211D; border-radius: 24px 24px 0 0;
+  box-shadow: inset 0 1px 0 #29413A; padding: 10px 16px 18px;
+  color: #EAF5F2;
+}}
+.handle {{ width: 36px; height: 4px; border-radius: 2px;
+  background: rgba(255,255,255,.22); margin: 0 auto 12px; }}
+.sheet .head {{ display: flex; align-items: center; justify-content: space-between; }}
+.sheet .head h2 {{ margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -.2px; }}
+.link {{ font-size: 13px; font-weight: 600; color: #78D7C7; }}
+.presets {{ display: flex; gap: 8px; margin-top: 14px; }}
+.preset {{
+  flex: 1; height: 92px; border-radius: 16px; background: #172C27;
+  padding: 12px 10px; position: relative;
+}}
+.preset.on {{ background: #1B2D27; box-shadow: inset 0 0 0 1.5px #78D7C7; }}
+.preset .pname {{ font-size: 14px; font-weight: 700; }}
+.preset .pmeta {{ margin-top: 8px; font-size: 11px; line-height: 1.55; color: #9CB0AA;
+  font-variant-numeric: tabular-nums; }}
+.preset .check {{
+  position: absolute; top: 10px; right: 10px; width: 16px; height: 16px;
+  border-radius: 50%; background: #78D7C7; color: #0A2B20; font-size: 10px;
+  font-weight: 900; display: flex; align-items: center; justify-content: center;
+}}
+.label {{ font-size: 12px; color: #9CB0AA; margin: 18px 0 8px; font-weight: 600; }}
+.seg {{ display: flex; height: 44px; border-radius: 14px; background: #172C27; padding: 3px; gap: 3px; }}
+.seg div {{
+  flex: 1; border-radius: 12px; display: flex; align-items: center;
+  justify-content: center; font-size: 12px; font-weight: 700; color: #9CB0AA;
+}}
+.seg div.on {{ background: #2A413A; color: #EAF5F2; }}
+.seg.small div {{ font-size: 11px; }}
+.slider {{ position: relative; height: 28px; margin-top: 4px; }}
+.slider .rail {{ position: absolute; left: 0; right: 0; top: 12px; height: 4px;
+  border-radius: 2px; background: #29413A; }}
+.slider .fill {{ position: absolute; left: 0; top: 12px; height: 4px; width: 65%;
+  border-radius: 2px; background: #78D7C7; }}
+.slider .knob {{ position: absolute; left: calc(65% - 9px); top: 5px; width: 18px;
+  height: 18px; border-radius: 50%; background: #EAF5F2; box-shadow: 0 1px 3px rgba(0,0,0,.4); }}
+.slider .val {{ position: absolute; right: 0; top: -22px; font-size: 12px;
+  font-weight: 700; color: #EAF5F2; font-variant-numeric: tabular-nums; }}
+.confirm {{ margin-top: 16px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: #9CB0AA; }}
+.confirm .ok {{ color: #78D7C7; font-weight: 700; }}
+.apply {{ margin-top: 12px; width: 100%; height: 48px; border-radius: 14px;
+  border: 0; background: #78D7C7; color: #0A2B20; font-size: 14px;
+  font-weight: 800; font-family: inherit; }}
+/* diagnostics */
+.subtitle {{ margin: 2px 16px 12px; font-size: 12px; color: var(--muted); }}
+.grid3 {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 16px; }}
+.tile {{ background: var(--surface); border-radius: 16px; padding: 12px;
+  box-shadow: inset 0 0 0 1px var(--line); }}
+.tile .k {{ font-size: 11px; color: var(--muted); font-weight: 600; }}
+.tile .v {{ margin-top: 8px; font-size: 20px; font-weight: 700; letter-spacing: -.4px;
+  font-variant-numeric: tabular-nums; }}
+.tile .u {{ font-size: 11px; font-weight: 500; color: var(--muted); margin-left: 3px; }}
+.chart {{ margin: 12px 16px 0; padding: 14px 14px 8px; }}
+.chart .head {{ display: flex; justify-content: space-between; align-items: baseline; }}
+.chart .head h3 {{ margin: 0; font-size: 14px; font-weight: 700; }}
+.chart .legend {{ font-size: 11px; color: var(--muted); display: flex; gap: 10px; }}
+.chart .legend i {{ display: inline-block; width: 12px; height: 2px; margin-right: 4px;
+  vertical-align: middle; border-radius: 1px; }}
+.rows {{ margin: 12px 16px 0; padding: 6px 16px; }}
+.rowline {{ display: flex; justify-content: space-between; padding: 11px 0; font-size: 13px; }}
+.rowline + .rowline {{ box-shadow: inset 0 1px 0 var(--line); }}
+.rowline span:first-child {{ color: var(--muted); }}
+.rowline b {{ font-weight: 600; font-variant-numeric: tabular-nums; }}
+.note {{ margin: 12px 16px 0; font-size: 11px; line-height: 1.55; color: var(--muted); }}
+"""
+
+
+def svg(path: str, size: int = 20, stroke: str = "currentColor", width: float = 1.7) -> str:
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+        f'stroke="{stroke}" stroke-width="{width}" stroke-linecap="round" '
+        f'stroke-linejoin="round">{path}</svg>'
+    )
+
+
+GEAR = svg(
+    '<circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21'
+    'M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6"/>'
+)
+MOON = svg('<circle cx="12" cy="12" r="7"/><path d="M12 5a7 7 0 0 0 0 14z" fill="currentColor" stroke="none"/>')
+CHEV = svg('<path d="M9 5l7 7-7 7"/>', 18)
+BACK = svg('<path d="M15 5l-7 7 7 7"/>', 22)
+LOCK = svg('<rect x="5" y="11" width="14" height="9" rx="2.2"/><path d="M8.5 11V8.5a3.5 3.5 0 0 1 7 0V11"/>')
+CAM = svg('<rect x="3.5" y="7" width="17" height="12" rx="2.6"/><circle cx="12" cy="13" r="3.4"/>')
+MORE = svg('<circle cx="6" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18" cy="12" r="1.4" fill="currentColor"/>')
+STOP = svg('<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>', 22)
+REC = svg('<circle cx="12" cy="12" r="5.5" fill="currentColor" stroke="none"/>', 22)
+SHOT = svg('<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 15l2.2-2.6 2 2.2 1.8-2.2 2.4 3"/>')
+LAYOUT = svg('<rect x="4" y="5" width="16" height="6.5" rx="1.6"/><rect x="4" y="14" width="16" height="5" rx="1.6"/>')
+LINK = svg('<path d="M10 14a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7L11 7.3"/><path d="M14 10a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 0 0 5.7 5.7l1.6-1.6"/>', 22)
+PULSE = svg('<path d="M3 12h4l2.2-6 3.4 12 2.4-6H21"/>', 22)
+WIFI = svg('<path d="M4 9.5a12 12 0 0 1 16 0M7 13a8 8 0 0 1 10 0M10 16.4a3.4 3.4 0 0 1 4 0"/><circle cx="12" cy="19.4" r="1" fill="currentColor" stroke="none"/>', 22)
+
+
+def statusbar() -> str:
+    return (
+        '<div class="statusbar"><span>21:14</span>'
+        '<span class="icons"><i></i><i style="width:16px"></i></span></div>'
+    )
+
+
+def nav(active: str) -> str:
+    items = [("connect", "连接", LINK), ("diag", "诊断", PULSE), ("settings", "设置", GEAR)]
+    out = ['<div class="nav">']
+    for key, label, icon in items:
+        cls = "item on" if key == active else "item"
+        out.append(f'<div class="{cls}">{icon}<span>{label}</span></div>')
+    out.append("</div>")
+    return "".join(out)
+
+
+def connect_page() -> str:
+    guide = "".join(
+        f'<li><span class="n">{i}</span><span>{t}</span></li>'
+        for i, t in enumerate(
+            ["在掌机打开 <b>3DS Live</b>", "在就绪画面按 <b>R + SELECT</b>", "回到此页等待自动连接"],
+            start=1,
+        )
+    )
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>{BASE_CSS}</style></head><body>
+<div class="phone">
+  {statusbar()}
+  <div class="topbar"><div class="logo">3DS</div><div class="title">3DS Live</div>
+    <div class="spacer"></div><div class="iconbtn">{MOON}</div><div class="iconbtn">{GEAR}</div></div>
+  <div class="content">
+    <div class="card status-card">
+      <div class="status-line"><span class="dot amber"></span><span class="status-title">正在寻找掌机</span></div>
+      <p class="body">在掌机打开 3DS Live 后按 <b>R + SELECT</b>，两端会自动配对。</p>
+      <div class="actions"><button class="btn primary">停止搜索</button>
+        <button class="btn outline">手动 IP…</button></div>
+    </div>
+    <div class="section"><h2>发现的掌机</h2><span class="count">2 台</span></div>
+    <div class="card device"><div class="tile">3DS</div>
+      <div><div class="name">New 3DS · 192.168.1.23</div>
+      <div class="meta">刚刚 · session 8F2A</div></div><div class="chev">{CHEV}</div></div>
+    <div class="card device"><div class="tile">3DS</div>
+      <div><div class="name">New 3DS XL · 192.168.1.31</div>
+      <div class="meta">2 分钟前 · session 3C19</div></div><div class="chev">{CHEV}</div></div>
+    <div class="section"><h2>最近使用</h2></div>
+    <div class="card device recent"><div class="tile">3DS</div>
+      <div><div class="name">192.168.1.23</div>
+      <div class="meta">昨天 21:40 · 均衡 · Q70</div></div><div class="chev">{CHEV}</div></div>
+    <div class="card guide"><h3>首次使用？3 步开始投屏</h3><ol>{guide}</ol></div>
+  </div>
+  {nav('connect')}
+</div>
+</body></html>"""
+
+
+def live_page() -> str:
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>{BASE_CSS}</style></head><body class="dark">
+<div class="phone live">
+  <div class="stage">
+    <div class="screen top">上屏 · 400×240</div>
+    <div class="screen bottom">下屏 · 320×240</div>
+  </div>
+  <div class="hud">
+    <div class="row"><div class="back">{BACK}</div>
+      <div class="pill"><span class="dot green"></span>29.8 · Q70 · 1.8 MB/s</div>
+      <div class="tools"><div class="icircle">{LOCK}</div><div class="icircle">{CAM}</div>
+        <div class="icircle">{MORE}</div></div></div>
+  </div>
+  <div class="badge-rec"><span class="dot" style="background:#E05A5A;width:6px;height:6px;border-radius:50%;box-shadow:none"></span>00:42</div>
+  <div class="dock">
+    <div class="chips"><div class="chip">高清</div><div class="chip on">均衡</div><div class="chip">低带宽</div></div>
+    <div class="row">
+      <div class="icircle record">{REC}</div><div class="icircle">{SHOT}</div>
+      <div class="icircle">{LAYOUT}</div>
+      <div class="spacer"></div><div class="icircle" style="width:44px;height:44px;border-radius:12px;background:rgba(224,90,90,.9);color:#fff">{STOP}</div>
+    </div>
+  </div>
+</div>
+</body></html>"""
+
+
+def quality_page() -> str:
+    def preset(name: str, meta: str, on: bool) -> str:
+        check = '<div class="check">✓</div>' if on else ""
+        cls = "preset on" if on else "preset"
+        return f'<div class="{cls}"><div class="pname">{name}</div><div class="pmeta">{meta}</div>{check}</div>'
+
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>{BASE_CSS}</style></head><body class="dark">
+<div class="sheet-scene">
+  <div class="stage" style="opacity:.55">
+    <div class="screen top">上屏 · 400×240</div>
+    <div class="screen bottom">下屏 · 320×240</div>
+  </div>
+  <div class="sheet-backdrop"></div>
+  <div class="sheet">
+    <div class="handle"></div>
+    <div class="head"><h2>掌机推流</h2><span class="link">重置</span></div>
+    <div class="presets">
+      {preset("高清", "30 FPS<br>Q80<br>2.0 MB/s", False)}
+      {preset("均衡", "30 FPS<br>Q70<br>2.0 MB/s", True)}
+      {preset("低带宽", "24 FPS<br>Q40<br>1.0 MB/s", False)}
+    </div>
+    <div class="label">目标帧率</div>
+    <div class="seg"><div>15</div><div>20</div><div>24</div><div class="on">30</div></div>
+    <div class="label">JPEG 质量</div>
+    <div class="seg small"><div>自动</div><div>Q40</div><div>Q60</div><div class="on">Q70</div><div>Q80</div></div>
+    <div class="label">带宽上限</div>
+    <div class="slider"><div class="rail"></div><div class="fill"></div>
+      <div class="knob"></div><div class="val">1.80 MB/s</div></div>
+    <div class="label">带宽模式</div>
+    <div class="seg"><div class="on">自适应上限</div><div>固定上限</div></div>
+    <div class="confirm"><span>掌机确认</span><span class="ok">Q70 · 2.00 MB/s · 29.8 fps</span></div>
+    <button class="apply">应用</button>
+  </div>
+</div>
+</body></html>"""
+
+
+def diagnostics_page() -> str:
+    tiles = [
+        ("双屏收齐", "29.8", "FPS"), ("上屏呈现", "29.7", "FPS"), ("掌机上限", "2.00", "MB/s"),
+        ("掌机提交", "1.92", "MB/s"), ("本机实收", "1.78", "MB/s"), ("实际质量", "Q70", ""),
+    ]
+    grid = "".join(
+        f'<div class="tile"><div class="k">{k}</div><div class="v">{v}'
+        + (f'<span class="u">{u}</span>' if u else "") + "</div></div>"
+        for k, v, u in tiles
+    )
+
+    # 60 s sparkline: FPS around 28-30 with a dip, bandwidth dashed around 1.7-1.9
+    fps = [(0,26),(6,29),(12,30),(18,29),(24,22),(30,26),(36,29),(42,30),(48,30),(54,29),(60,30)]
+    bw = [(0,24),(6,27),(12,28),(18,27),(24,20),(30,24),(36,27),(42,28),(48,28),(54,27),(60,28)]
+    W, H = 356, 78
+
+    def pts(series, lo=18, hi=32):
+        return " ".join(f"{x / 60 * W:.1f},{H - (y - lo) / (hi - lo) * H:.1f}" for x, y in series)
+
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>{BASE_CSS}</style></head><body>
+<div class="phone">
+  {statusbar()}
+  <div class="topbar"><div class="title">诊断</div><div class="spacer"></div>
+    <span class="link" style="color:var(--primary)">导出 JSON</span></div>
+  <div class="subtitle">采样窗口 4.0 s · 已对齐两端状态报文</div>
+  <div class="grid3">{grid}</div>
+  <div class="card chart">
+    <div class="head"><h3>近 60 秒</h3><div class="legend">
+      <span><i style="background:var(--primary)"></i>收齐 FPS</span>
+      <span><i style="background:var(--secondary)"></i>带宽</span></div></div>
+    <svg width="{W}" height="{H + 10}" viewBox="0 0 {W} {H + 10}" style="margin-top:10px">
+      <line x1="0" y1="{H}" x2="{W}" y2="{H}" stroke="#E7E9F2" stroke-width="1"/>
+      <polyline points="{pts(bw)}" fill="none" stroke="#5268F2" stroke-width="1.5"
+        stroke-dasharray="4 4" stroke-linejoin="round"/>
+      <polyline points="{pts(fps)}" fill="none" stroke="#238E82" stroke-width="2"
+        stroke-linejoin="round" stroke-linecap="round"/>
+    </svg>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:#73798C;margin-top:2px">
+      <span>60 秒前</span><span>30</span><span>现在</span></div>
+  </div>
+  <div class="card rows">
+    <div class="rowline"><span>缺片帧</span><b>12</b></div>
+    <div class="rowline"><span>修复成功 / 超时</span><b>9 / 3</b></div>
+    <div class="rowline"><span>行复用节省</span><b>38%</b></div>
+    <div class="rowline"><span>LZ4 下屏节省</span><b>6%</b></div>
+    <div class="rowline"><span>音频已收 / 空洞</span><b>60.0 s / 0.4 s</b></div>
+  </div>
+  <div class="note">窗口以掌机状态报文对齐：两端 MB/s 同计音视频与 IPv4/UDP 头，排除状态报文。</div>
+  {nav('diag')}
+</div>
+</body></html>"""
+
+
+PAGES = {
+    "connect": ("connect.html", connect_page),
+    "live": ("live.html", live_page),
+    "quality": ("quality.html", quality_page),
+    "diagnostics": ("diagnostics.html", diagnostics_page),
+}
+
+for key, (name, build) in PAGES.items():
+    (OUT / name).write_text(build(), encoding="utf-8")
+    print(f"wrote {name}")
