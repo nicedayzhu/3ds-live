@@ -1011,8 +1011,7 @@ class Viewer final : public QWidget {
         openFile->setEnabled(false);
         openFolder->setEnabled(false);
         menu->addSeparator();
-        action(menu, "画面与补帧设置…", {}, [this] { openSettings(PictureTab); });
-        action(menu, "连接与输出…", QKeySequence("Ctrl+,"), [this] { openSettings(ConnectionTab); });
+        action(menu, "投屏设置…", QKeySequence("Ctrl+,"), [this] { openSettings(StreamTab); });
         auto *diagnostics = submenu("性能诊断", "diagnosticsMenu");
         action(diagnostics, "性能详情", Qt::Key_F12, [this] { showDebug(); });
         diagnostics->addAction(copyShot);
