@@ -458,12 +458,12 @@ int main(int argc, char **argv) {
         return 35;
     update(R"({"motion":"rife","rife_precision":"fp16","debug":{"motion":"rife","rife_precision":"fp16"}})");
     info->click();
-    if (!card->text().contains("设置 FP16") || !card->text().contains("等待推理")) return 36;
+    if (!card->text().contains("RIFE 设置") || !card->text().contains("FP16") || !card->text().contains("等待推理")) return 36;
     update(R"({"debug":{"motion":"rife","rife_precision":"fp16","motion_backend":"TensorRT FP16","motion_processing_ms":6.4}})");
-    if (!card->text().contains("实际 TensorRT FP16") || !card->text().contains("6.4 ms") || card->text().contains("回退"))
+    if (!card->text().contains("TensorRT FP16") || !card->text().contains("6.4 ms") || card->text().contains("回退"))
         return 37;
     update(R"({"debug":{"motion":"rife","rife_precision":"fp16","motion_backend":"DirectML","motion_backend_fallback":"Missing FP16 model"}})");
-    if (!card->text().contains("设置 FP16") || !card->text().contains("实际 DirectML FP32") ||
+    if (!card->text().contains("RIFE 设置") || !card->text().contains("DirectML FP32") ||
         !card->text().contains("已回退") || !checkSingleRow()) return 38;
     update(R"({"debug":{"motion":"rife","rife_precision":"fp16","motion_error":"Missing models"}})");
     if (!card->text().contains("推理失败") || card->text().contains("等待推理")) return 40;

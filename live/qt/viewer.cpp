@@ -14,6 +14,8 @@ class Canvas final : public QWidget {
     QSize sourceSize;
     QImage image;
     QString screenLayout = "stacked";
+    QString targetLayout = "stacked";
+    QActionGroup *layoutGroup = nullptr;
     QWidget *bottomWindow = nullptr;
     Canvas *bottomCanvas = nullptr;
     std::function<void()> onPainted;
@@ -166,6 +168,8 @@ class Viewer final : public QWidget {
     QTabWidget *settingsTabs;
     QComboBox *fps, *rate, *rateMode, *jpegQuality, *layoutChoice, *motion, *scale, *rifePrecision = nullptr;
     QString screenLayout = "stacked";
+    QString targetLayout = "stacked";
+    QActionGroup *layoutGroup = nullptr;
     QWidget *bottomWindow = nullptr;
     Canvas *bottomCanvas = nullptr;
     QLineEdit *ip, *rtsp;
@@ -973,6 +977,20 @@ class Viewer final : public QWidget {
             action(motionMenu, "显示与补帧设置…", {}, [this] { openEffectSettings(); });
         }
         menu->addSeparator();
+        auto *layoutMenu = submenu("画面布局", "layoutMenu");
+        layoutGroup = new QActionGroup(layoutMenu);
+        for (const auto &entry : {std::pair{"上下双屏", "stacked"}, std::pair{"左右双屏", "side-by-side"},
+                                   std::pair{"分离窗口", "separate"}, std::pair{"仅上屏", "top-only"},
+                                   std::pair{"仅下屏", "bottom-only"}}) {
+            auto *a = action(layoutMenu, entry.first, {}, [this, id = QString(entry.second)] {
+                queue.append(QJsonObject{{"type", "limit"}, {"layout", id}});
+            });
+            a->setData(QString(entry.second));
+            a->setCheckable(true);
+            layoutGroup->addAction(a);
+            a->setChecked(o["layout"].toString() == entry.second);
+        }
+        action(layoutMenu, "更多布局设置…", {}, [this] { openSettings(PictureTab); });
         auto *viewing = submenu("观看", "viewingMenu");
         if (o["mute"].toBool())
             mute = action(viewing, "静音", {}, [this] { emitAction("mute"); });
@@ -993,6 +1011,7 @@ class Viewer final : public QWidget {
         openFile->setEnabled(false);
         openFolder->setEnabled(false);
         menu->addSeparator();
+        action(menu, "显示与布局…", {}, [this] { openSettings(PictureTab); });
         action(menu, "连接与输出…", QKeySequence("Ctrl+,"), [this] { openSettings(ConnectionTab); });
         auto *diagnostics = submenu("性能诊断", "diagnosticsMenu");
         action(diagnostics, "性能详情", Qt::Key_F12, [this] { showDebug(); });
@@ -1102,6 +1121,11 @@ class Viewer final : public QWidget {
             quality->setText(v["quality"].toString());
         if (v.contains("layout")) {
             const QString next = v["layout"].toString();
+            if (targetLayout != next) {
+                targetLayout = next;
+                if (layoutGroup)
+                    for (auto *a : layoutGroup->actions()) a->setChecked(a->data().toString() == next);
+            }
             if (next != screenLayout) {
                 screenLayout = next;
                 applyCanvasLayout();

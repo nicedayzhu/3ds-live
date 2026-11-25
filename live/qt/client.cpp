@@ -391,6 +391,19 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                 return;
             }
             if (type == "limit") {
+                if (e.contains("layout")) {
+                    const QString next = e["layout"].toString();
+                    if (next != "stacked" && next != "side-by-side" && next != "separate" &&
+                        next != "top-only" && next != "bottom-only") continue;
+                    o.layout = next;
+                    receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate, layoutMask(next));
+                    notify(next == "top-only" ? "仅上屏：已释放下屏编码与带宽" :
+                           next == "bottom-only" ? "仅下屏：已释放上屏编码与带宽" :
+                           next == "separate" ? "已分离下屏窗口" : "已切换画面布局");
+                    updateView(view, {{"layout", next}});
+                    remember();
+                    continue;
+                }
                 const int hz = e["fps"].toInt(o.fps), cap = e["rate"].toInt(o.rate);
                 const int jpegQuality = e["jpegQuality"].toInt(o.jpegQuality);
                 const bool adaptive = e["adaptiveRate"].toBool(o.adaptiveRate);
