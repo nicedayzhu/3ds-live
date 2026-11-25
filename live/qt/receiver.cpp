@@ -119,7 +119,7 @@ static int locateHandheld(QUdpSocket &socket, quint16 discoveryPort, const QHost
 Receiver::Receiver(Timeline &t, Pipeline &p, QHostAddress ip, quint16 udp, int hz, int cap, quint16 lookupPort,
                    int jpegQuality, bool adaptive, std::optional<int> packetPacing)
     : timeline(t), pipeline(p), sender(ip), port(udp), handheldDiscoveryPort(lookupPort), requestedPacing(packetPacing),
-      requested{int(live_migrate_fps(hz)), cap, jpegQuality, adaptive} {
+      requested{int(live_migrate_fps(hz)), cap, jpegQuality, 3, adaptive} {
     worker = std::thread(&Receiver::run, this);
 }
 Receiver::~Receiver() {
@@ -189,6 +189,7 @@ void Receiver::run() {
     std::optional<int> pacingMode;
     std::optional<quint32> lastTimingMs;
     quint32 lastScreenCounterMs = 0;
+    int lastSentMask = 3;
     qint64 lastEncodedTop = -1, lastEncodedBottom = -1, lastSentTop = -1, lastSentBottom = -1;
     QJsonObject timing;
     qint64 lastPacingStatusUs = 0, lastTimingUs = 0;
@@ -762,12 +763,14 @@ void Receiver::run() {
         if (remote && current && now - lastConfig > 500000 && now - lastSeen < 2000000 && freq > 0 &&
             (wireQuality != LIVE_JPEG_EXTRA_QUALITY || supportsQ70) &&
             (hz != freq || cap != effective || !assembler.combined ||
-             (splitSupported && splitActive) || (deviceQuality && *deviceQuality != wireQuality))) {
+             (splitSupported && splitActive) || (deviceQuality && *deviceQuality != wireQuality) ||
+             config.mask != lastSentMask)) {
             if (++request == 0)
                 ++request;
+            socket.writeDatagram(message("R23C", {*current, quint32(requested.mask)}), peer, remote);
+            lastSentMask = config.mask;
             if (deviceQuality) {
-                socket.writeDatagram(message("R23C", {*current, quint32(requested.mask)}), peer, remote);
-        socket.writeDatagram(message("R16C", {*current, request, quint32(freq), quint32(effective),
+                socket.writeDatagram(message("R16C", {*current, request, quint32(freq), quint32(effective),
                                                       1u, quint32(wireQuality)}), peer, remote);
             } else if (splitSupported) {
                 socket.writeDatagram(message("R15C", {*current, request, quint32(freq), quint32(effective),

@@ -16,6 +16,7 @@ class Canvas final : public QWidget {
     QString screenLayout = "stacked";
     QString targetLayout = "stacked";
     QActionGroup *layoutGroup = nullptr;
+    QImage lastFrame;
     QWidget *bottomWindow = nullptr;
     Canvas *bottomCanvas = nullptr;
     std::function<void()> onPainted;
@@ -170,6 +171,7 @@ class Viewer final : public QWidget {
     QString screenLayout = "stacked";
     QString targetLayout = "stacked";
     QActionGroup *layoutGroup = nullptr;
+    QImage lastFrame;
     QWidget *bottomWindow = nullptr;
     Canvas *bottomCanvas = nullptr;
     QLineEdit *ip, *rtsp;
@@ -1087,11 +1089,14 @@ class Viewer final : public QWidget {
             bottomWindow->setWindowTitle("3DS Live · 下屏");
             bottomCanvas = new Canvas(QSize(320, 240), bottomWindow);
             bottomCanvas->setObjectName("bottomCanvas");
-            bottomCanvas->show();
             auto *lay = new QVBoxLayout(bottomWindow);
             lay->setContentsMargins(0, 0, 0, 0);
             lay->addWidget(bottomCanvas);
+            bottomWindow->resize(320, 240);
         }
+        bottomCanvas->setLayoutMode("bottom-only");
+        if (!lastFrame.isNull()) bottomCanvas->setImage(lastFrame, {});
+        bottomWindow->resize(320, 240);
         bottomWindow->show();
     }
     void hideBottomWindow() {
@@ -1106,6 +1111,7 @@ class Viewer final : public QWidget {
         if (bottomCanvas) bottomCanvas->setLayoutMode("bottom-only");
     }
     void setImage(const QImage &im, std::function<void()> painted) {
+        lastFrame = im;
         if (screenLayout == "separate") {
             canvas->setImage(im, {});
             if (bottomCanvas) bottomCanvas->setImage(im, std::move(painted));
