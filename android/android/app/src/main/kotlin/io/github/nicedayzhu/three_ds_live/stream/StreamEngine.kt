@@ -33,6 +33,7 @@ class StreamEngine(
         var rate: Int = 800000,
         var quality: Int = 0,
         var adaptive: Boolean = true,
+    var audioPriority: Boolean = true,
         var bufferMs: Int = 100,
         var layout: String = "stacked",
         var muted: Boolean = false,
@@ -51,6 +52,7 @@ class StreamEngine(
                 (map["rate"] as? Number)?.let { settings.rate = it.toInt() }
                 (map["jpeg_quality"] as? Number)?.let { settings.quality = it.toInt() }
                 (map["adaptive_rate"] as? Boolean)?.let { settings.adaptive = it }
+        (map["audio_priority"] as? Boolean)?.let { settings.audioPriority = it }
                 (map["buffer_ms"] as? Number)?.let { settings.bufferMs = it.toInt() }
                 (map["layout"] as? String)?.let { settings.layout = it }
                 (map["muted"] as? Boolean)?.let { settings.muted = it }
@@ -938,7 +940,11 @@ class StreamEngine(
             "window_seconds" to seconds,
         )
         if (settings.adaptive && pairs > 0) {
-            val audioLoss = if (gapDelta >= 3 || lateDelta >= 12) rate.notifyAudioLoss() else null
+            val audioLoss = if (settings.audioPriority && (gapDelta >= 3 || lateDelta >= 12)) {
+                rate.notifyAudioLoss()
+            } else {
+                null
+            }
             val fpsChange = rate.observe(completeFps, settings.fps, seconds)
             if (audioLoss != null || fpsChange != null) {
                 if (gapDelta >= 3 || lateDelta >= 12) {

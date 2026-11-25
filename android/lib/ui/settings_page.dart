@@ -155,6 +155,15 @@ class SettingsPage extends StatelessWidget {
               onChanged: (value) => update(settings.copyWith(muted: value)),
             ),
           ),
+          SettingsRow(
+            title: '丢包时优先保音频',
+            subtitle: '声音出现破音时自动小幅降低视频码率，网络恢复后自动回升',
+            trailing: Switch(
+              value: settings.audioPriority,
+              onChanged: (value) =>
+                  update(settings.copyWith(audioPriority: value)),
+            ),
+          ),
         ]),
         _Section(title: '录制', children: [
           _SegmentRow<String>(

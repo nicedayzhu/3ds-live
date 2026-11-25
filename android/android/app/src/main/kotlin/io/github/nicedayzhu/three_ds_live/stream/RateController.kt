@@ -11,27 +11,31 @@ class RateController(private val floor: Int = 400_000) {
     var requested = 0
         private set
     private var ceiling = 0
+    private var effectiveFloor = floor
     private var quietWindows = 0
     private var healthyWindows = 0
 
     fun reset(rate: Int) {
-        ceiling = rate.coerceAtLeast(floor)
+        ceiling = rate.coerceAtLeast(1)
+        effectiveFloor = floor.coerceAtMost(ceiling)
         requested = ceiling
         quietWindows = 0
         healthyWindows = 0
     }
 
     fun setCeiling(rate: Int) {
-        ceiling = rate.coerceAtLeast(floor)
+        ceiling = rate.coerceAtLeast(1)
+        effectiveFloor = floor.coerceAtMost(ceiling)
         if (requested > ceiling) requested = ceiling
-        if (requested < floor) requested = floor
+        if (requested < effectiveFloor) requested = effectiveFloor
     }
 
     /** Backs off quickly when audio blocks are being lost: audio is small and cheap
      *  to protect, and freeing airtime lowers loss for both streams. */
     fun notifyAudioLoss(): Int? {
-        if (requested <= floor) return null
-        requested = (requested * 3 / 4).coerceAtLeast(floor)
+        if (requested <= effectiveFloor) return null
+        // 10% is enough to relieve a congested 2.4 GHz link without visible blur.
+        requested = (requested * 9 / 10).coerceAtLeast(effectiveFloor)
         quietWindows = 0
         healthyWindows = 0
         return requested
@@ -54,8 +58,8 @@ class RateController(private val floor: Int = 400_000) {
             quietWindows = 0
             healthyWindows = 0
         }
-        if (quietWindows >= 3 && requested > floor) {
-            requested = (requested * 4 / 5).coerceAtLeast(floor)
+        if (quietWindows >= 3 && requested > effectiveFloor) {
+            requested = (requested * 4 / 5).coerceAtLeast(effectiveFloor)
             quietWindows = 0
             return requested
         }
