@@ -11,6 +11,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.view.Surface
 import io.flutter.view.TextureRegistry
 import java.io.File
@@ -62,6 +63,7 @@ class VideoSink(
     private var lastTopQuality = 0
     private var lastBottomQuality = 0
     private var frames = 0L
+    private var lockFailures = 0
     private var lastPresentNanos = 0L
 
     val textureId: Long get() = producer.id()
@@ -74,8 +76,24 @@ class VideoSink(
     fun setLayout(next: Layout) {
         if (layout == next) return
         layout = next
-        producer.setSize(next.width, next.height)
-        surface = producer.getSurface()
+        refreshSurface()
+    }
+
+    /**
+     * ImageReader-backed producers only hand out a usable buffer once the Flutter
+     * texture is attached; the surface created in init is often too early. Creating it
+     * again on the first frame (or after a failed lock) makes the first picture appear
+     * without the user touching the layout button.
+     */
+    private fun refreshSurface() {
+        try {
+            producer.setSize(layout.width, layout.height)
+            surface = producer.getSurface()
+            lockFailures = 0
+            Log.i("3ds-live", "texture surface ${layout.width}x${layout.height} refreshed")
+        } catch (error: Throwable) {
+            Log.w("3ds-live", "texture surface refresh failed: ${error.message}")
+        }
     }
 
     fun decode(jpeg: ByteArray): Bitmap? {
@@ -96,12 +114,18 @@ class VideoSink(
             lastBottom = bottom
             lastBottomQuality = bottomQuality
         }
+        if (frames == 0L || lockFailures > 0) refreshSurface()
         val target = surface ?: return
         val canvas: Canvas = try {
             target.lockCanvas(null)
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            lockFailures++
+            if (lockFailures <= 2) {
+                Log.w("3ds-live", "texture lockCanvas failed (${lockFailures}): ${error.message}")
+            }
             return
         }
+        lockFailures = 0
         try {
             compose(canvas)
         } finally {
