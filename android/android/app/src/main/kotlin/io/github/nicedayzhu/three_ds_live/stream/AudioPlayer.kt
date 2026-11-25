@@ -43,6 +43,9 @@ class AudioPlayer {
     // Small reorder window: UDP can deliver R9A1 packets out of order and a missing
     // block must be concealed instead of being skipped abruptly.
     private val pending = java.util.TreeMap<Int, ShortArray>()
+    // 16 blocks ~= 78 ms of jitter tolerance; the sender repeats each batch once
+    // about two datagrams later, so a single lost packet fits inside this window.
+    private val reorderWindow = 16
     private var expectedBlock = Int.MIN_VALUE
     private var lastPcm: ShortArray? = null
     private var fadeInNext = false
@@ -212,18 +215,27 @@ class AudioPlayer {
         val delta = blockSeq - expectedBlock
         if (delta < 0) {
             reordered++
+            if (reordered <= 20) {
+                Logs.w("3ds-live", "audio late block=$blockSeq expected=$expectedBlock")
+            }
             return
         }
         if (pending.containsKey(blockSeq)) return
-        if (delta > 64) {
+        if (delta > 128) {
             // Long gap (session restart or heavy loss): jump forward.
             pending.clear()
             expectedBlock = blockSeq
             gaps++
         }
         pending[blockSeq] = pcm
-        if (pending.size > 8) {
+        if (pending.size > reorderWindow) {
             val target = pending.firstKey()
+            if (gaps < 20) {
+                Logs.w(
+                    "3ds-live",
+                    "audio gap expected=$expectedBlock first=$target pending=${pending.size}",
+                )
+            }
             while (expectedBlock < target) {
                 emit(conceal())
                 fadeInNext = true
