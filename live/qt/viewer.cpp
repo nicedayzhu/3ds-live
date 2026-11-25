@@ -891,6 +891,8 @@ class Viewer final : public QWidget {
         limitsMenu->addSeparator();
         auto *editStream = action(limitsMenu, "自定义参数…", {}, [this] { openSettings(StreamTab); });
         editStream->setObjectName("editStreamSettings");
+        limitsMenu->addSeparator();
+        action(limitsMenu, "重新监听…", {}, [this] { emitAction("retry"); });
         menu->addSeparator();
         auto *bandwidth = quickRate->menu();
         bandwidth->setToolTipsVisible(true);
@@ -931,7 +933,7 @@ class Viewer final : public QWidget {
         updatePictureScale(o["mode"].toString(), o["scale"].toInt(1));
         const auto modes = o["modes"].toObject();
         if (!modes.isEmpty()) {
-            auto *pictureMenu = submenu("PC 画质增强", "pictureMenu");
+            auto *pictureMenu = submenu("画质增强", "pictureMenu");
             pictureMenu->setToolTipsVisible(true);
             auto *group = new QActionGroup(pictureMenu);
             for (auto id : {"off", "fast-detail", "fbcnn", "fbcnn-detail", "span", "fbcnn-sr", "clean", "gpu", "sr"}) {
@@ -958,7 +960,7 @@ class Viewer final : public QWidget {
             action(pictureMenu, "开关画质增强", Qt::Key_E, [this] { emitAction("enhance"); });
         }
         if (o["motion"].toBool()) {
-            auto *motionMenu = submenu("运动补帧", "motionMenu");
+            auto *motionMenu = submenu("补帧", "motionMenu");
             motionMenu->setToolTipsVisible(true);
             auto *group = new QActionGroup(motionMenu);
             for (int i = 0; i < motion->count(); ++i) {
@@ -974,7 +976,7 @@ class Viewer final : public QWidget {
             }
             motionMenu->addSeparator();
             action(motionMenu, "开关补帧", Qt::Key_F, [this] { emitAction("motion"); });
-            action(motionMenu, "显示与补帧设置…", {}, [this] { openEffectSettings(); });
+            action(motionMenu, "画质增强模型…", {}, [this] { openEffectSettings(); });
         }
         menu->addSeparator();
         auto *layoutMenu = submenu("画面布局", "layoutMenu");
@@ -990,15 +992,21 @@ class Viewer final : public QWidget {
             layoutGroup->addAction(a);
             a->setChecked(o["layout"].toString() == entry.second);
         }
-        action(layoutMenu, "更多布局设置…", {}, [this] { openSettings(PictureTab); });
         auto *viewing = submenu("观看", "viewingMenu");
         if (o["mute"].toBool())
             mute = action(viewing, "静音", {}, [this] { emitAction("mute"); });
         auto *toolbarAction = action(viewing, "隐藏工具栏", Qt::Key_H, [this] { controls(panel->isHidden()); });
         auto *fullAction = action(viewing, "全屏", Qt::Key_F11, [this] { fullscreen(); });
-        connect(viewing, &QMenu::aboutToShow, this, [this, toolbarAction, fullAction] {
+        auto *topAction = action(viewing, "窗口置顶", {}, [this] {
+            const bool on = !windowFlags().testFlag(Qt::WindowStaysOnTopHint);
+            setWindowFlag(Qt::WindowStaysOnTopHint, on);
+            show();
+        });
+        topAction->setCheckable(true);
+        connect(viewing, &QMenu::aboutToShow, this, [this, toolbarAction, fullAction, topAction] {
             toolbarAction->setText(panel->isHidden() ? "显示工具栏" : "隐藏工具栏");
             fullAction->setText(isFullScreen() ? "退出全屏" : "全屏");
+            topAction->setChecked(windowFlags().testFlag(Qt::WindowStaysOnTopHint));
         });
         auto *recordings = submenu("录像", "recordingMenu");
         recordAction = action(recordings, "开始录像", QKeySequence("Ctrl+R"), [this] { toggleRecording(); });
@@ -1015,8 +1023,6 @@ class Viewer final : public QWidget {
         auto *diagnostics = submenu("性能诊断", "diagnosticsMenu");
         action(diagnostics, "性能详情", Qt::Key_F12, [this] { showDebug(); });
         diagnostics->addAction(copyShot);
-        diagnostics->addSeparator();
-        action(diagnostics, "重新监听", {}, [this] { emitAction("retry"); });
         connect(new QShortcut(Qt::Key_Escape, this), &QShortcut::activated, this, [this] {
             if (isFullScreen())
                 showNormal();
