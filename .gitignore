@@ -9,3 +9,5 @@ __pycache__/
 *.cxi
 *.log
 /live/qt/models/
+.toolchains/
+

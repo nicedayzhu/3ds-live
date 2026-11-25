@@ -52,7 +52,8 @@ static inline uint32_t live_combined_budget(uint32_t rate,uint32_t fps) {
 }
 #define LIVE_JPEG_EXTRA_QUALITY 70u  /* Announced to receivers by R16Q v1. */
 static inline int live_valid_quality_target(unsigned q) {
-    return q==0||q==40||q==60||q==LIVE_JPEG_EXTRA_QUALITY||q==80;
+    return q==0||q==15||q==20||q==25||q==30||q==35||q==40||q==50||
+           q==60||q==LIVE_JPEG_EXTRA_QUALITY||q==80;
 }
 /* The caller has validated the R6CF/R10C/R16C tag and exact length. Only
  * R16C carries a JPEG selection; its explicit zero requests automatic Q. */

@@ -326,7 +326,15 @@ class Viewer final : public QWidget {
             rows << QString("源帧 %1   ·   生成 %2   ·   合计 %3 FPS")
                         .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1))
                  << QString("运动补帧 %1   ·   缓冲 %2 ms").arg(motionName, number("playout_delay_ms"))
-                 << QString("掌机发送 %1   ·   双屏收齐 %2 FPS").arg(number("device_sent_fps", 1), number("fps_received", 1))
+                 << QString("掌机发送 %1   ·   上 %2 / 下 %3 FPS   ·   双屏收齐 %4")
+                        .arg(number("device_sent_fps", 1), number("device_sent_top_fps", 1),
+                             number("device_sent_bottom_fps", 1), number("fps_received", 1))
+                 << QString("掌机编码 上 %1 / 下 %2 FPS   ·   下屏复用 %3%")
+                        .arg(number("device_encoded_top_fps", 1), number("device_encoded_bottom_fps", 1),
+                             number("device_bottom_reuse_percent", 0))
+                 << QString("每对 %1 KB   ·   上屏编码 %2 ms   ·   下屏编码 %3 ms")
+                        .arg(number("pair_bytes", 1, 1024.), number("top_encode_us", 1, 1000.),
+                             number("bottom_encode_us", 1, 1000.))
                  << QString("%1 %2   ·   掌机当前上限 %3 MB/s")
                         .arg(snapshot.value("adaptive_rate").toBool(true) ? "自适应上限" : "固定上限",
                              number("requested_rate", 2, 1e6), number("device_cap", 2, 1e6))
@@ -608,7 +616,7 @@ class Viewer final : public QWidget {
         jpegQuality = new QComboBox(settings);
         jpegQuality->setObjectName("jpegQuality");
         jpegQuality->addItem("自动", 0);
-        for (int q : {40, 60, 70, 80})
+        for (int q : {15, 20, 25, 30, 35, 40, 50, 60, 70, 80})
             jpegQuality->addItem(QString("Q%1").arg(q), q);
         jpegQuality->setCurrentIndex(std::max(0, jpegQuality->findData(o["jpegQuality"].toInt())));
         jpegQuality->setToolTip("控制掌机上下屏的 JPEG 编码。Q 越高，通常越清晰、每帧也越大。自动档按带宽预算选择质量。");

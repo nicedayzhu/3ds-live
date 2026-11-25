@@ -27,10 +27,10 @@ Future<void> _phoneViewport(WidgetTester tester) async {
 void main() {
   test('stream presets match the Qt player', () {
     final ids = kStreamPresets.map((preset) => preset.id).toList();
-    expect(ids, ['hd30', 'balanced30', 'low24']);
+    expect(ids, ['hd30', 'balanced30', 'low24', 'saver30', 'tiny24']);
     expect(kStreamPresets.first.fps, 30);
     expect(kStreamPresets.first.jpegQuality, 80);
-    expect(kStreamPresets.last.rate, 1000000);
+    expect(kStreamPresets.last.rate, 600000);
     expect(qualityLabel(0), '自动');
     expect(qualityLabel(70), 'Q70');
   });

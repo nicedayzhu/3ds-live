@@ -277,7 +277,7 @@ int main(int argc, char **argv) {
         !cap->menu()->actions().contains(fixed)) return 103;
     auto *jpegMenu = root->findChild<QMenu *>("jpegQualityMenu");
     auto *jpegChoice = root->findChild<QComboBox *>("jpegQuality");
-    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 5 || jpegChoice->currentData().toInt() != 0 ||
+    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 11 || jpegChoice->currentData().toInt() != 0 ||
         sourceJpeg->menu() != jpegMenu || sourceJpeg->text() != "自动Q" ||
         pictureMenu->actions().contains(jpegMenu->menuAction()))
         return 95;
@@ -521,16 +521,19 @@ int main(int argc, char **argv) {
     auto *hd = actionFor(limits, "hd30");
     auto *balancedNow = actionFor(limits, "balanced30");
     auto *low = actionFor(limits, "low24");
+    auto *saver = actionFor(limits, "saver30");
+    auto *tiny = actionFor(limits, "tiny24");
     auto *presetButton = root->findChild<QToolButton *>("streamPresets");
-    if (!hd || !balancedNow || !low || !presetButton) return 130;
+    if (!hd || !balancedNow || !low || !saver || !tiny || !presetButton) return 130;
     QList<QAction *> streamActions;
     for (auto *action : limits->actions())
         if (!action->isSeparator() && action->isVisible()) streamActions.append(action);
-    if (streamActions != QList<QAction *>{hd,balancedNow,low,editStream} ||
-        !hd->isCheckable() || !balancedNow->isCheckable() || !low->isCheckable()) return 148;
+    if (streamActions != QList<QAction *>{hd,balancedNow,low,saver,tiny,editStream} ||
+        !hd->isCheckable() || !balancedNow->isCheckable() || !low->isCheckable() ||
+        !saver->isCheckable() || !tiny->isCheckable()) return 148;
     auto matchingPreset = [&](QAction *expected) {
         QMetaObject::invokeMethod(limits, "aboutToShow");
-        for (auto *action : {hd, balancedNow, low})
+        for (auto *action : {hd, balancedNow, low, saver, tiny})
             if (action->isChecked() != (action == expected)) return false;
         return true;
     };
@@ -553,6 +556,12 @@ int main(int argc, char **argv) {
     if (!matchingPreset(nullptr)) return 154;
     update(R"({"fps":24,"jpegQuality":40,"rate":1000000})");
     if (!matchingPreset(low)) return 155;
+    update(R"({"fps":30,"jpegQuality":25,"rate":800000,"adaptiveRate":false})");
+    if (!matchingPreset(saver)) return 158;
+    update(R"({"fps":24,"jpegQuality":20,"rate":600000})");
+    if (!matchingPreset(tiny)) return 159;
+    update(R"({"fps":24,"jpegQuality":40,"rate":1000000})");
+    if (!matchingPreset(low)) return 160;
     auto *balanced = actionFor(presetButton->menu(), "balanced30");
     if (!balanced) return 132;
     balanced->trigger();

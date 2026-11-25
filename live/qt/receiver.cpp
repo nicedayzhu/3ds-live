@@ -187,6 +187,8 @@ void Receiver::run() {
     QJsonObject senderCounters, deviceAudioQueue;
     std::optional<int> pacingMode;
     std::optional<quint32> lastTimingMs;
+    quint32 lastScreenCounterMs = 0;
+    qint64 lastEncodedTop = -1, lastEncodedBottom = -1, lastSentTop = -1, lastSentBottom = -1;
     QJsonObject timing;
     qint64 lastPacingStatusUs = 0, lastTimingUs = 0;
     qint64 senderCountersAt = 0;
@@ -677,6 +679,24 @@ void Receiver::run() {
                           {"device_expired", qint64(word(b, 10))},
                           {"top_encode_us", int(word(b, 14))},
                           {"bottom_encode_us", int(word(b, 15))}};
+                if (lastScreenCounterMs && elapsed > lastScreenCounterMs) {
+                    const double seconds = (elapsed - lastScreenCounterMs) / 1000.0;
+                    if (lastEncodedTop >= 0) {
+                        device["device_encoded_top_fps"] = (word(b, 5) - lastEncodedTop) / seconds;
+                        device["device_encoded_bottom_fps"] = (word(b, 6) - lastEncodedBottom) / seconds;
+                        device["device_sent_top_fps"] = (word(b, 7) - lastSentTop) / seconds;
+                        device["device_sent_bottom_fps"] = (word(b, 8) - lastSentBottom) / seconds;
+                        const double pairs = double(word(b, 7) - lastSentTop);
+                        const double encoded = double(word(b, 6) - lastEncodedBottom);
+                        if (pairs > 0)
+                            device["device_bottom_reuse_percent"] = 100.0 * (1.0 - encoded / pairs);
+                    }
+                }
+                lastScreenCounterMs = elapsed;
+                lastEncodedTop = word(b, 5);
+                lastEncodedBottom = word(b, 6);
+                lastSentTop = word(b, 7);
+                lastSentBottom = word(b, 8);
                 if (word(b, 12) <= 3 && word(b, 13) <= 3) {
                     device["encoder_core_top"] = int(word(b, 12));
                     device["encoder_core_bottom"] = int(word(b, 13));

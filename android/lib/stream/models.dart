@@ -153,10 +153,12 @@ const List<StreamPreset> kStreamPresets = [
   StreamPreset('hd30', '高清', 30, 80, 2000000),
   StreamPreset('balanced30', '均衡', 30, 70, 2000000),
   StreamPreset('low24', '低带宽', 24, 40, 1000000),
+  StreamPreset('saver30', '省流', 30, 25, 800000),
+  StreamPreset('tiny24', '极省', 24, 20, 600000),
 ];
 
 const List<int> kFpsOptions = [15, 20, 24, 30];
-const List<int> kQualityOptions = [0, 40, 60, 70, 80];
+const List<int> kQualityOptions = [0, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80];
 
 String qualityLabel(int quality) =>
     quality == 0 ? '自动' : 'Q$quality';

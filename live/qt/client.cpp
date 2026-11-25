@@ -77,7 +77,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     arg("scale", "Display scale 1 or 2", "1");
     arg("fps", "Source FPS (15, 20, 24 or 30)", "30");
     arg("rate", "Sender byte/s ceiling", "800000");
-    arg("jpeg-quality", "Handheld JPEG quality target: 0 (automatic), 40, 60, 70 or 80", "0");
+    arg("jpeg-quality", "Handheld JPEG quality target: 0 (automatic), 15, 20, 25, 30, 35, 40, 50, 60, 70 or 80", "0");
     arg("stream-preset", "Fixed-rate streaming settings: hd30, balanced30 or low24. Explicit fps, rate and JPEG options override the preset.");
     arg("delay", "Playout delay in ms (100 standard, 160 for FBCNN)", "100");
     arg("record", "Save MP4 on launch");
@@ -155,7 +155,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
     bool qualityParsed = false;
     o.jpegQuality = cli.value("jpeg-quality").toInt(&qualityParsed);
     if (!qualityParsed || !isSourceJpegQuality(o.jpegQuality)) {
-        qWarning("--jpeg-quality expects 0, 40, 60, 70 or 80");
+        qWarning("--jpeg-quality expects 0, 15, 20, 25, 30, 35, 40, 50, 60, 70 or 80");
         return 2;
     }
     if (preset && !cli.isSet("jpeg-quality")) o.jpegQuality = preset->jpegQuality;
@@ -641,6 +641,12 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                 window["presented_top_fps"] = count * 1000000. / (end-begin);
                 report["delivery_window"] = window;
             }
+        }
+        {
+            const double sentFps = report.value("device_sent_fps").toDouble();
+            const double media = report.value("device_media_bytes_per_s").toDouble();
+            if (sentFps > 0 && media > 0)
+                report["pair_bytes"] = media / sentFps;
         }
         report["fps_presented"] = delta / interval;
         report["fps_source_presented"] = sourceDelta / interval;
