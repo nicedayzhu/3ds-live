@@ -14,6 +14,8 @@ class Canvas final : public QWidget {
     QSize sourceSize;
     QImage image;
     QString screenLayout = "stacked";
+    QWidget *bottomWindow = nullptr;
+    Canvas *bottomCanvas = nullptr;
     std::function<void()> onPainted;
     QElapsedTimer submitClock;
     qint64 paintedChanges = 0, coalesced = 0, maxPaintNs = 0;
@@ -80,6 +82,17 @@ class Canvas final : public QWidget {
             shown = image.copy(0, 0, image.width(), image.height() / 2);
         else if (screenLayout == "bottom-only" && image.height() > 1)
             shown = image.copy(0, image.height() / 2, image.width(), image.height() - image.height() / 2);
+        else if (screenLayout == "side-by-side" && image.height() > 1) {
+            const int half = image.height() / 2;
+            const int scale = std::max(1, image.width() / 400);
+            shown = QImage(720 * scale, 240 * scale, QImage::Format_RGB888);
+            shown.fill(Qt::black);
+            QPainter composer(&shown);
+            composer.drawImage(QRect(0, 0, 400 * scale, 240 * scale),
+                               image, QRect(0, 0, 400, half));
+            composer.drawImage(QRect(400 * scale, 0, 320 * scale, 240 * scale),
+                               image, QRect(0, half, 320, half));
+        }
         QSize sz = shown.size().scaled(size(), Qt::KeepAspectRatio);
         QRect target(QPoint((width() - sz.width()) / 2, (height() - sz.height()) / 2), sz);
         if (target != rect())
@@ -153,6 +166,8 @@ class Viewer final : public QWidget {
     QTabWidget *settingsTabs;
     QComboBox *fps, *rate, *rateMode, *jpegQuality, *layoutChoice, *motion, *scale, *rifePrecision = nullptr;
     QString screenLayout = "stacked";
+    QWidget *bottomWindow = nullptr;
+    Canvas *bottomCanvas = nullptr;
     QLineEdit *ip, *rtsp;
     QSpinBox *port;
     struct EffectChoice {
@@ -334,13 +349,12 @@ class Viewer final : public QWidget {
             rows << QString("源帧 %1   ·   生成 %2   ·   合计 %3 FPS")
                         .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1))
                  << QString("运动补帧 %1   ·   缓冲 %2 ms").arg(motionName, number("playout_delay_ms"))
-                 << QString("掌机发送 %1 / 目标 %2 对/s   ·   上屏 %3   ·   下屏新帧 %4 FPS   ·   双屏收齐 %5")
+                 << QString("掌机发送 %1 / 目标 %2 对/s   ·   上屏 %3 / 下屏 %4 FPS   ·   双屏收齐 %5")
                         .arg(number("device_sent_fps", 1), number("requested_fps"),
-                             number("device_sent_top_fps", 1), number("device_bottom_new_fps", 1),
+                             number("device_sent_top_fps", 1), number("device_sent_bottom_fps", 1),
                              number("fps_received", 1))
-                 << QString("掌机编码 上 %1 / 下 %2 FPS   ·   下屏复用 %3%")
-                        .arg(number("device_encoded_top_fps", 1), number("device_encoded_bottom_fps", 1),
-                             number("device_bottom_reuse_percent", 0))
+                 << QString("掌机编码 上 %1 / 下 %2 FPS")
+                        .arg(number("device_encoded_top_fps", 1), number("device_encoded_bottom_fps", 1))
                  << QString("每对 %1 KB   ·   上屏编码 %2 ms   ·   下屏编码 %3 ms")
                         .arg(number("pair_bytes", 1, 1024.), number("top_encode_us", 1, 1000.),
                              number("bottom_encode_us", 1, 1000.))
@@ -633,6 +647,8 @@ class Viewer final : public QWidget {
         layoutChoice = new QComboBox(settings);
         layoutChoice->setObjectName("layoutChoice");
         layoutChoice->addItem("上下双屏", "stacked");
+        layoutChoice->addItem("左右双屏", "side-by-side");
+        layoutChoice->addItem("分离窗口", "separate");
         layoutChoice->addItem("仅上屏", "top-only");
         layoutChoice->addItem("仅下屏", "bottom-only");
         layoutChoice->setCurrentIndex(std::max(0, layoutChoice->findData(o.value("layout").toString())));
@@ -720,7 +736,9 @@ class Viewer final : public QWidget {
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
         QSize size(o["width"].toInt(), o["height"].toInt());
+        screenLayout = o.value("layout").toString("stacked");
         canvas = new Canvas(size, this);
+        applyCanvasLayout();
         canvas->setObjectName("canvas");
         canvas->installEventFilter(this);
         layout->addWidget(canvas, 1);
@@ -991,14 +1009,46 @@ class Viewer final : public QWidget {
     void updatePictureScale(const QString &mode, int value) {
         scale->setCurrentIndex(value == 2);
         scale->setEnabled(mode != "sr" && mode != "span" && mode != "fast-detail" && mode != "fbcnn-detail" && mode != "fbcnn-sr");
-        QSize target = screenLayout == "top-only" ? QSize(400 * value, 240 * value)
+        QSize target = (screenLayout == "top-only" || screenLayout == "separate") ? QSize(400 * value, 240 * value)
                      : screenLayout == "bottom-only" ? QSize(320 * value, 240 * value)
+                     : screenLayout == "side-by-side" ? QSize(720 * value, 240 * value)
                      : QSize(400 * value, 480 * value);
         if (target == canvas->sizeHint()) return;
         canvas->setSourceSize(target);
         if (!isMaximized() && !isFullScreen()) fitCanvas(target);
     }
-    void setImage(const QImage &im, std::function<void()> painted) { canvas->setImage(im, std::move(painted)); }
+    void ensureBottomWindow() {
+        if (!bottomWindow) {
+            bottomWindow = new QWidget(this, Qt::Tool);
+            bottomWindow->setWindowTitle("3DS Live · 下屏");
+            bottomCanvas = new Canvas(QSize(320, 240), bottomWindow);
+            bottomCanvas->setObjectName("bottomCanvas");
+            bottomCanvas->show();
+            auto *lay = new QVBoxLayout(bottomWindow);
+            lay->setContentsMargins(0, 0, 0, 0);
+            lay->addWidget(bottomCanvas);
+        }
+        bottomWindow->show();
+    }
+    void hideBottomWindow() {
+        if (!bottomWindow) return;
+        bottomWindow->hide();
+    }
+    void applyCanvasLayout() {
+        if (!canvas) return;
+        canvas->setLayoutMode(screenLayout == "separate" ? "top-only" : screenLayout);
+        if (screenLayout == "separate") ensureBottomWindow();
+        else hideBottomWindow();
+        if (bottomCanvas) bottomCanvas->setLayoutMode("bottom-only");
+    }
+    void setImage(const QImage &im, std::function<void()> painted) {
+        if (screenLayout == "separate") {
+            canvas->setImage(im, {});
+            if (bottomCanvas) bottomCanvas->setImage(im, std::move(painted));
+        } else {
+            canvas->setImage(im, std::move(painted));
+        }
+    }
     QJsonObject paintStats() { return canvas->paintStats(); }
     QJsonArray pullEvents() { return std::exchange(queue, QJsonArray{}); }
     void receive(const QJsonObject &v) {
@@ -1014,7 +1064,7 @@ class Viewer final : public QWidget {
             const QString next = v["layout"].toString();
             if (next != screenLayout) {
                 screenLayout = next;
-                canvas->setLayoutMode(next);
+                applyCanvasLayout();
                 if (layoutChoice) layoutChoice->setCurrentIndex(std::max(0, layoutChoice->findData(next)));
                 updatePictureScale("", scale ? scale->currentData().toInt() : 1);
             }

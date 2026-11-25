@@ -50,7 +50,6 @@ object Wire {
     const val R10C = "R10C"
     const val R15C = "R15C"
     const val R16C = "R16C"
-    const val R22C = "R22C"
     const val R23C = "R23C"
     const val R3FB = "R3FB"
 

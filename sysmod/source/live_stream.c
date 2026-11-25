@@ -79,10 +79,9 @@ static u32 jobKind,jobQuality,jobDone,jobSize[2],jobChanged[2],jobUs[2];
  * is running. The previous JPEG is re-sent on skipped frames, so receivers need
  * no protocol change; at Q25 a reused bottom costs only a few KB. */
 #define BOTTOM_FPS 8u
-#define BOTTOM_QUALITY 25u
 #define BOTTOM_REUSE_BYTES 24576u
 static u8 bottomReuse[BOTTOM_REUSE_BYTES];
-static u32 bottomReuseSize,bottomCounter,bottomReusedFrames,bottomFps=8;
+static u32 bottomReuseSize;
 /* Bit 0 = top screen, bit 1 = bottom screen. A single-screen mask skips the
  * hidden encoder entirely and sends per-screen packets, so both ARM11 time and
  * airtime are released instead of rendering a panel nobody displays. */
@@ -198,7 +197,6 @@ bool live_audio_submit(const s16 *pcm,u32 pts) {
     return live_audio_queue_push(&audioQueue,pcm,pts,svcGetSystemTick());
 }
 static void encode_job(unsigned sc,unsigned kind,unsigned q) {
-    if(sc==1&&q>BOTTOM_QUALITY)q=BOTTOM_QUALITY;
     u64 begin=svcGetSystemTick();
     if(kind==1) {
         int changed=live_jpeg_prepare_yuv(sc,rawWorking[sc],rawBytes[sc]);
@@ -237,7 +235,6 @@ static bool run_pair_job(unsigned kind,unsigned q,bool bottom) {
     return !stopped();
 }
 static u32 payload_size(unsigned screen,unsigned q,bool combined) {
-    if(screen==1&&q>BOTTOM_QUALITY)q=BOTTOM_QUALITY;
     u32 size=jobSize[screen];
     /* Budget exactly what packing will send, including a full-JPEG fallback. */
     if(combined&&compactJpeg&&live_jpeg_wire_size(size)&&
@@ -309,7 +306,7 @@ static void measure_pair(RowPairPlan *plan,unsigned q,bool combined,bool useRows
                          const RowAnchor *base,const RowAnchor *probe,bool bottomRows) {
     *plan=(RowPairPlan){.valid=useRows};
     for(unsigned sc=0;sc<2;sc++) {
-        unsigned qs=(sc==1&&q>BOTTOM_QUALITY)?BOTTOM_QUALITY:q;
+        unsigned qs=q;
         if(!useRows) {
             plan->wire[sc]=payload_size(sc,q,combined);
             continue;
@@ -456,7 +453,7 @@ static void encoder(void *arg) {
         bool combined=combinedFec&&screenMask==3;
         unsigned targetQ=qualityTarget;
         bool useRows=rowsEnabled&&combined&&compactJpeg;
-        bool bottomRows=combined&&bottomFps>=jobFps;
+        bool bottomRows=combined;
         bool useR20=useRows&&bottomRows&&r20_recent(now);
         RowAnchor *base=useRows?rowBase:NULL;
         RowAnchor *probe=useRows?rowProbe:NULL;
@@ -512,9 +509,7 @@ static void encoder(void *arg) {
             memcpy(pendingBytes+pair->offset,encoded[sc],wire);
             continue;
         }
-        const u32 bottomPeriod=bottomFps?(jobFps+bottomFps-1)/bottomFps:0;
-        bool bottom=bottomReuseSize==0||(bottomFps&&(bottomCounter++%bottomPeriod)==0);
-        if(!bottom)bottomReusedFrames++;
+        const bool bottom=true;
         if(!run_pair_job(1,q,bottom))break;
         live_timing_encoded();
         RowPairPlan plan;
@@ -1001,15 +996,6 @@ static void control(u64 *due) {
                 }
                 continue;
             }
-            if(n==12&&!memcmp(msg,"R22C",4)) {
-                u32 fps=get32(msg+8);
-                if(fps==0||fps==5||fps==8||fps==10||fps==15||fps==30) {
-                    bottomFps=fps;
-                    bottomReuseSize=0;
-                    peer_activity(now);
-                }
-                continue;
-            }
             if(n==12&&!memcmp(msg,"R19A",4)&&get32(msg+8)==1) {
                 repairPeerAt=now;
                 peer_activity(now);
@@ -1322,7 +1308,7 @@ Result live_start(void *(*allocate)(u32 bytes)) {
     memset(changedMcus,0,sizeof changedMcus);memset(sourceReuse,0,sizeof sourceReuse);memset(lastSource,0,sizeof lastSource);
     memset(frames,0,sizeof frames);memset(lastEncodeUs,0,sizeof lastEncodeUs);
     sequence=replaced=errors=expired=oversize=retries=pairs=sendCalls=sendMaxUs=feedbackCount=0;
-    configEpoch=configSequence=configChanges=ratePendingKept=rateEncodingKept=0;sendSumUs=0;lastErrno=0;qualityTarget=0;quality=60;spare=0;bottomReuseSize=0;bottomCounter=0;bottomReusedFrames=0;bottomFps=8;screenMask=3;
+    configEpoch=configSequence=configChanges=ratePendingKept=rateEncodingKept=0;sendSumUs=0;lastErrno=0;qualityTarget=0;quality=60;spare=0;bottomReuseSize=0;screenMask=3;
     payloadControl=(LivePayloadControl){.percent=100};
     compactSavedBytes=0;compactFrames=compactFallbacks=0;
     rowsEnabled=false;rowBase=rowCandidate=rowProbe=rowBanks=NULL;

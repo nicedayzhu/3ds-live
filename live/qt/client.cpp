@@ -418,7 +418,8 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                 }
                 bool changed = ip != o.ip || e["port"].toInt() != o.port;
                 const QString nextLayout = e["layout"].toString(o.layout);
-                const bool layoutChanged = nextLayout != o.layout && (nextLayout == "stacked" || nextLayout == "top-only" || nextLayout == "bottom-only");
+                const bool layoutChanged = nextLayout != o.layout && (nextLayout == "stacked" || nextLayout == "side-by-side" || nextLayout == "separate" ||
+                            nextLayout == "top-only" || nextLayout == "bottom-only");
                 const int jpegQuality = e["jpegQuality"].toInt(o.jpegQuality);
                 const bool adaptive = e["adaptiveRate"].toBool(o.adaptiveRate);
                 if (!live_valid_fps(e["fps"].toInt()) || !isSourceJpegQuality(jpegQuality))
