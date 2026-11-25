@@ -224,7 +224,7 @@ class Assembler(
             if (partial.repairRequested || maxIndices <= 0) continue
             if (partial.received >= partial.chunkCount) continue
             val quiet = now - partial.lastProgress
-            if (quiet < 3_000_000L) continue
+            if (quiet < 10_000_000L) continue
             if (now - partial.lastProgress > budgetNanos) continue
             val missing = ArrayList<Int>()
             for (i in partial.chunks.indices) {

@@ -142,6 +142,7 @@ class StreamEngine(
     private var incompletePairs = 0L
     private var repairedPairs = 0L
     private var repairRequests = 0L
+    private var lastRepairRequestNanos = 0L
     private var repairPackets = 0L
     private var repairTimeouts = 0L
     private var statsIncomplete = 0L
@@ -704,6 +705,11 @@ class StreamEngine(
         val address = peerIp ?: return
         if (peerSupportsRepair <= 0 || indices.isEmpty()) return
         if (indices.size > peerSupportsRepair) return
+        // Repair traffic competes with the video and audio it is trying to save.
+        // A 15 ms gap keeps at most a few requests in flight on a 2.4 GHz link.
+        val now = SystemClock.elapsedRealtimeNanos()
+        if (now - lastRepairRequestNanos < 15_000_000L) return
+        lastRepairRequestNanos = now
         repairRequests++
         Logs.d(TAG, "repair seq=$seq indices=${indices.joinToString(",")}")
         val buffer = java.nio.ByteBuffer.allocate(20 + indices.size)
@@ -758,6 +764,7 @@ class StreamEngine(
                 setPhase("holding", "掌机暂时没有新的画面")
             }
         }
+        audio.tick(now)
         assembler.poll(now, peerSupportsRepair, (settings.bufferMs + 90).toLong() * 1_000_000L)
         emitWindow(now)
     }
@@ -947,6 +954,7 @@ class StreamEngine(
             }
             val fpsChange = rate.observe(completeFps, settings.fps, seconds)
             if (audioLoss != null || fpsChange != null) {
+                Logs.i(TAG, "rate -> ${rate.requested} (settings=${settings.rate})")
                 if (gapDelta >= 3 || lateDelta >= 12) {
                     Logs.w(
                         TAG,

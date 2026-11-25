@@ -55,6 +55,7 @@ class AudioPlayer {
     private var lastUnderrun = 0
     private var peakQueue = 0
     private var appliedVolume = -1f
+    private var pendingSince = 0L
 
     @Volatile var muted = false
     @Volatile var volume = 1f
@@ -149,6 +150,7 @@ class AudioPlayer {
     fun reset() {
         queue.clear()
         pending.clear()
+        pendingSince = 0L
         expectedBlock = Int.MIN_VALUE
         lastPcm = null
         fadeInNext = false
@@ -209,11 +211,11 @@ class AudioPlayer {
             pcm[(i + 1) * 2 + 1] = r.toShort()
         }
         if (!running.get()) return
-        dispatch(blockSeq, pcm)
+        dispatch(blockSeq, pcm, nowNanos)
     }
 
     /** Orders blocks, conceals gaps and hands contiguous PCM to the player. */
-    private fun dispatch(blockSeq: Int, pcm: ShortArray) {
+    private fun dispatch(blockSeq: Int, pcm: ShortArray, nowNanos: Long) {
         if (expectedBlock == Int.MIN_VALUE) expectedBlock = blockSeq
         val delta = blockSeq - expectedBlock
         if (delta < 0) {
@@ -231,6 +233,7 @@ class AudioPlayer {
             gaps++
         }
         pending[blockSeq] = pcm
+        if (pendingSince == 0L && expectedBlock < pending.firstKey()) pendingSince = nowNanos
         if (pending.size > reorderWindow) {
             val target = pending.firstKey()
             if (gaps < 20) {
@@ -251,6 +254,35 @@ class AudioPlayer {
             emit(next)
             expectedBlock++
         }
+        if (pending.isEmpty()) pendingSince = 0L
+    }
+
+    /**
+     * Called from the engine tick. A missing block used to be concealed only after
+     * 16 later blocks had queued, so a sparse burst could stall playout long enough
+     * to drain AudioTrack (the underruns seen in the device log). Conceal after
+     * 80 ms even when few later blocks are buffered.
+     */
+    fun tick(nowNanos: Long) {
+        if (!running.get() || pending.isEmpty()) {
+            pendingSince = 0L
+            return
+        }
+        if (pendingSince == 0L) pendingSince = nowNanos
+        if (nowNanos - pendingSince < 80_000_000L) return
+        val target = pending.firstKey()
+        if (target <= expectedBlock) {
+            pendingSince = 0L
+            return
+        }
+        Logs.w("3ds-live", "audio stall expected=$expectedBlock first=$target pending=${pending.size}")
+        while (expectedBlock < target) {
+            emit(conceal())
+            fadeInNext = true
+            expectedBlock++
+            gaps++
+        }
+        pendingSince = nowNanos
     }
 
     private fun emit(pcm: ShortArray) {
