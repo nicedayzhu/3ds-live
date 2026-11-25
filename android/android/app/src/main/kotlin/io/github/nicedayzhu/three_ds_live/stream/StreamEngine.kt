@@ -12,7 +12,6 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.random.Random
 
 /**
  * Owns the receive pipeline: discovery, media reassembly, row/delta reconstruction,
@@ -87,8 +86,6 @@ class StreamEngine(
     private var session = 0
     private var lastTraffic = 0L
     private var lastPeerSeen = 0L
-    private var challenge = 0
-    private var previousChallenge = 0
     private var sessionStarted = 0L
 
     private val resolver = ScreenResolver()
@@ -147,6 +144,7 @@ class StreamEngine(
 
     private var cap = 0
     private var parseFailures = 0
+    private var broadcastFailures = 0
     private val rate = RateController()
     private var deviceSentBytes = 0L
     private var deviceAppliedQuality = 0
@@ -178,6 +176,11 @@ class StreamEngine(
             datagramSocket.receiveBufferSize = 4 * 1024 * 1024
             datagramSocket.bind(InetSocketAddress(settings.port))
             datagramSocket.soTimeout = 30
+            try {
+                datagramSocket.broadcast = true
+            } catch (error: Throwable) {
+                Log.w(TAG, "SO_BROADCAST unavailable: ${error.message}")
+            }
             socket = datagramSocket
         } catch (error: Throwable) {
             running.set(false)
@@ -368,9 +371,9 @@ class StreamEngine(
         val replyChallenge = Wire.int(data, 8)
         val selected = peerIp
         if (selected != null && selected != address) return
-        if (replyChallenge != challenge && replyChallenge != previousChallenge) return
         if (session != 0 && replySession != session && phase == "live") return
-        Log.i(TAG, "peer=$address:$port session=${replySession.toString(16)}")
+        Log.i(TAG, "3DLS from $address:$port session=${replySession.toString(16)} "
+            + "challenge=${replyChallenge.toString(16)}")
         peerIp = address
         peerPort = port
         if (replySession != session) {
@@ -379,7 +382,10 @@ class StreamEngine(
             onNewSession()
         }
         lastPeerSeen = now
-        sendBinary(Wire.message(Wire.DISCOVERY_INVITE_REPLY, replySession, replyChallenge), address, port)
+        val ack = Wire.message(Wire.DISCOVERY_INVITE_REPLY, replySession, replyChallenge)
+        if (!sendBinary(ack, address, port)) {
+            Log.w(TAG, "3DLA to $address:$port failed")
+        }
         if (phase == "inviting" || phase == "lost") setPhase("reserved", null)
         emitDevices()
     }
@@ -642,12 +648,7 @@ class StreamEngine(
             invite(now)
         } else {
             if (now - lastInviteNanos > 1_000_000_000L) {
-                challenge = Random.nextInt()
-                sendBinary(
-                    Wire.message(Wire.DISCOVERY_PROBE, 1),
-                    address,
-                    8002,
-                )
+                sendBinary(Wire.message(Wire.DISCOVERY_PROBE, 1), address, 8002)
                 lastInviteNanos = now
             }
             sendConfiguration(force = false)
@@ -669,26 +670,37 @@ class StreamEngine(
         }
         if (now - lastInviteNanos < 1_000_000_000L) return
         lastInviteNanos = now
-        challenge = Random.nextInt()
-        previousChallenge = challenge
         val probe = Wire.message(Wire.DISCOVERY_PROBE, 1)
         sendBroadcast(probe)
     }
 
     private fun sendBroadcast(probe: ByteArray) {
+        val datagramSocket = socket ?: return
+        var sent = 0
         try {
-            socket?.send(DatagramPacket(probe, probe.size, InetAddress.getByName("255.255.255.255"), 8002))
-        } catch (_: Throwable) {
+            datagramSocket.send(
+                DatagramPacket(probe, probe.size, InetAddress.getByName("255.255.255.255"), 8002),
+            )
+            sent++
+        } catch (error: Throwable) {
+            if (broadcastFailures < 3) {
+                Log.w(TAG, "limited broadcast failed: ${error.message}")
+                broadcastFailures++
+            }
         }
         for (network in NetworkInterface.getNetworkInterfaces()) {
             for (interfaceAddress in network.interfaceAddresses) {
                 val broadcast = interfaceAddress.broadcast ?: continue
                 if (broadcast.isLoopbackAddress) continue
                 try {
-                    socket?.send(DatagramPacket(probe, probe.size, broadcast, 8002))
+                    datagramSocket.send(DatagramPacket(probe, probe.size, broadcast, 8002))
+                    sent++
                 } catch (_: Throwable) {
                 }
             }
+        }
+        if (broadcastFailures < 3) {
+            Log.d(TAG, "3DLP invitations sent=$sent")
         }
     }
 
@@ -747,11 +759,17 @@ class StreamEngine(
         }
     }
 
-    private fun sendBinary(data: ByteArray, address: String, port: Int) {
-        val datagramSocket = socket ?: return
-        try {
+    private fun sendBinary(data: ByteArray, address: String, port: Int): Boolean {
+        val datagramSocket = socket ?: return false
+        return try {
             datagramSocket.send(DatagramPacket(data, data.size, InetAddress.getByName(address), port))
-        } catch (_: Throwable) {
+            true
+        } catch (error: Throwable) {
+            if (broadcastFailures < 3) {
+                Log.w(TAG, "send to $address:$port failed: ${error.message}")
+                broadcastFailures++
+            }
+            false
         }
     }
 
