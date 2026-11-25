@@ -97,8 +97,8 @@ class MainActivity : FlutterActivity() {
                         .edit().putString("settings", json).apply()
                     result.success(null)
                 }
-                "startRecording" -> result.success(null)
-                "stopRecording" -> result.success(null)
+                "startRecording" -> result.success(engine?.startRecording())
+                "stopRecording" -> { engine?.stopRecording(); result.success(null) }
                 "exportDiagnostics" ->
                     result.success(engine?.exportDiagnostics() ?: emptyMap<String, Any?>())
                 else -> result.notImplemented()

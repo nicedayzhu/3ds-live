@@ -40,6 +40,7 @@ class AudioPlayer {
 
     @Volatile var muted = false
     @Volatile var volume = 1f
+    @Volatile var pcmSink: ((ShortArray) -> Unit)? = null
 
     var blocksPlayed = 0L
         private set
@@ -153,6 +154,7 @@ class AudioPlayer {
         lastRight = r
         if (!running.get()) return
         val resampledPcm = resample(pcm)
+        pcmSink?.invoke(resampledPcm)
         if (!queue.offer(resampledPcm)) {
             queue.poll()
             queue.offer(resampledPcm)

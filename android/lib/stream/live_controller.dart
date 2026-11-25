@@ -181,7 +181,7 @@ class LiveController extends ChangeNotifier {
       recordingPath = await _bridge.startRecording();
       recording = recordingPath != null;
       if (!recording) {
-        lastError = '录制将在下一阶段启用，当前版本只接收画面与声音。';
+        lastError = '录制启动失败：设备可能不支持 H.264 编码，或存储不可写。';
       }
       recordingSeconds = 0;
       if (recording) {

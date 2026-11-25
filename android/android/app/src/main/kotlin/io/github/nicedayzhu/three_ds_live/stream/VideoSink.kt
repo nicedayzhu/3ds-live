@@ -48,6 +48,7 @@ class VideoSink(
 
     private val producer: TextureRegistry.SurfaceProducer = registry.createSurfaceProducer()
     private var surface: Surface? = null
+    private var recordSurface: Surface? = null
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
     private val options = BitmapFactory.Options().apply {
         inPreferredConfig = Bitmap.Config.RGB_565
@@ -102,19 +103,7 @@ class VideoSink(
             return
         }
         try {
-            canvas.drawColor(Color.BLACK)
-            when (layout) {
-                Layout.STACKED -> {
-                    draw(canvas, lastTop, 0, 0, layout.width, layout.height / 2 - 4)
-                    draw(canvas, lastBottom, 0, layout.height / 2 + 4, layout.width, layout.height / 2 - 4)
-                }
-                Layout.SIDE_BY_SIDE -> {
-                    draw(canvas, lastTop, 0, 0, layout.width / 2 - 4, layout.height)
-                    draw(canvas, lastBottom, layout.width / 2 + 4, 0, layout.width / 2 - 4, layout.height)
-                }
-                Layout.TOP_ONLY -> draw(canvas, lastTop, 0, 0, layout.width, layout.height)
-                Layout.BOTTOM_ONLY -> draw(canvas, lastBottom, 0, 0, layout.width, layout.height)
-            }
+            compose(canvas)
         } finally {
             try {
                 target.unlockCanvasAndPost(canvas)
@@ -122,6 +111,7 @@ class VideoSink(
                 // Surface may be gone while the activity is being destroyed.
             }
         }
+        recordFrame()
         producer.scheduleFrame()
         frames++
         lastPresentNanos = System.nanoTime()
@@ -130,6 +120,43 @@ class VideoSink(
             lastTop?.width ?: 0,
             lastTop?.height ?: 0,
         )
+    }
+
+    fun setRecordSurface(surface: Surface?) {
+        recordSurface = surface
+    }
+
+    private fun compose(canvas: Canvas) {
+        canvas.drawColor(Color.BLACK)
+        when (layout) {
+            Layout.STACKED -> {
+                draw(canvas, lastTop, 0, 0, layout.width, layout.height / 2 - 4)
+                draw(canvas, lastBottom, 0, layout.height / 2 + 4, layout.width, layout.height / 2 - 4)
+            }
+            Layout.SIDE_BY_SIDE -> {
+                draw(canvas, lastTop, 0, 0, layout.width / 2 - 4, layout.height)
+                draw(canvas, lastBottom, layout.width / 2 + 4, 0, layout.width / 2 - 4, layout.height)
+            }
+            Layout.TOP_ONLY -> draw(canvas, lastTop, 0, 0, layout.width, layout.height)
+            Layout.BOTTOM_ONLY -> draw(canvas, lastBottom, 0, 0, layout.width, layout.height)
+        }
+    }
+
+    private fun recordFrame() {
+        val target = recordSurface ?: return
+        val canvas = try {
+            target.lockCanvas(null)
+        } catch (_: Throwable) {
+            return
+        }
+        try {
+            compose(canvas)
+        } finally {
+            try {
+                target.unlockCanvasAndPost(canvas)
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     private fun draw(canvas: Canvas, bitmap: Bitmap?, x: Int, y: Int, width: Int, height: Int) {

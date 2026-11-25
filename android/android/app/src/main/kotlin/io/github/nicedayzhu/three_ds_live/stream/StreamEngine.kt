@@ -33,6 +33,8 @@ class StreamEngine(
         var layout: String = "stacked",
         var muted: Boolean = false,
         var volume: Float = 1f,
+        var recordResolution: String = "720p",
+        var recordBitrate: Int = 8_000_000,
     ) {
         companion object {
             fun fromMap(map: Map<*, *>?): Settings {
@@ -49,6 +51,8 @@ class StreamEngine(
                 (map["layout"] as? String)?.let { settings.layout = it }
                 (map["muted"] as? Boolean)?.let { settings.muted = it }
                 (map["volume"] as? Number)?.let { settings.volume = it.toFloat() }
+                (map["record_resolution"] as? String)?.let { settings.recordResolution = it }
+                (map["record_bitrate"] as? Number)?.let { settings.recordBitrate = it.toInt() }
                 return settings
             }
         }
@@ -58,6 +62,7 @@ class StreamEngine(
         lastQuality = quality
     }
     private val audio = AudioPlayer()
+    private val recorder = Recorder(context)
     private val running = AtomicBoolean(false)
 
     private var socket: DatagramSocket? = null
@@ -134,6 +139,7 @@ class StreamEngine(
     private var lastMediaAt = 0L
 
     private var cap = 0
+    private val rate = RateController()
     private var deviceSentBytes = 0L
     private var deviceAppliedQuality = 0
     private var lastStatusNanos = 0L
@@ -149,6 +155,7 @@ class StreamEngine(
             return
         }
         this.settings = settings
+        rate.reset(settings.rate)
         sink.setLayout(VideoSink.Layout.from(settings.layout))
         audio.muted = settings.muted
         audio.volume = settings.volume
@@ -175,6 +182,7 @@ class StreamEngine(
     }
 
     fun stop() {
+        stopRecording()
         if (!running.getAndSet(false)) return
         receiveThread?.join(300)
         tickThread?.join(300)
@@ -196,6 +204,7 @@ class StreamEngine(
         val layoutChanged = next.layout != settings.layout
         val targetChanged = next.handheldIp != settings.handheldIp
         settings = next
+        rate.reset(next.rate)
         audio.muted = next.muted
         audio.volume = next.volume
         if (layoutChanged) sink.setLayout(VideoSink.Layout.from(next.layout))
@@ -218,6 +227,37 @@ class StreamEngine(
     }
 
     fun capture(): String? = sink.capture()
+
+    /** Starts MP4 recording of the composed canvas plus the decoded audio. */
+    fun startRecording(): String? {
+        if (recorder.isRecording) return recorder.path
+        val scale = if (settings.recordResolution == "1080p") 1.5 else 1.0
+        val width = even(sink.layout.width * scale)
+        val height = even(sink.layout.height * scale)
+        val path = recorder.start(width, height, settings.recordBitrate, withAudio = !settings.muted)
+        if (path != null) {
+            sink.setRecordSurface(recorder.surface)
+            audio.pcmSink = { pcm -> recorder.writeAudio(pcm) }
+            events(mapOf("type" to "recording", "active" to true, "path" to path))
+        }
+        return path
+    }
+
+    fun stopRecording(): String? {
+        val wasRecording = recorder.isRecording
+        val path = recorder.stop()
+        sink.setRecordSurface(null)
+        audio.pcmSink = null
+        if (wasRecording) {
+            events(mapOf("type" to "recording", "active" to false, "path" to path))
+        }
+        return path
+    }
+
+    private fun even(value: Double): Int {
+        val rounded = value.toInt()
+        return if (rounded % 2 == 0) rounded else rounded + 1
+    }
 
     fun refreshTexture(): Long = sink.textureId
     fun release() {
@@ -257,7 +297,7 @@ class StreamEngine(
         when (tag) {
             Wire.DISCOVERY_PROBE_REPLY -> onProbeReply(address, packet.port, data, length, now)
             Wire.R10P, Wire.R10F, Wire.R19P -> onMedia(data, length, address, packet.port, now, tag)
-            Wire.R3P2, Wire.R3F2 -> onPerScreen(data, length, address, now, tag)
+            Wire.R3P2, Wire.R3F2 -> onPerScreen(data, length, address, packet.port, now, tag)
             Wire.R9A1 -> onAudio(data, length, address, now)
             Wire.R7ST, Wire.R9ST -> onStatus(data, length, address, packet.port, now, tag)
             Wire.R16S -> onQualityReport(data, length, address, now)
@@ -332,13 +372,18 @@ class StreamEngine(
         }
     }
 
-    private fun onPerScreen(data: ByteArray, length: Int, address: String, now: Long, tag: String) {
-        // Older senders use R3P2/R3F2; they are accepted but not composed yet.
+    private fun onPerScreen(data: ByteArray, length: Int, address: String, port: Int, now: Long, tag: String) {
         if (!accepts(address, Wire.int(data, 4))) return
         lastTraffic = now
+        peerIp = address
+        peerPort = port
+        lastPeerSeen = now
         packets++
         windowPackets++
         windowBytes += length + 28
+        if (assembler.submitPerScreen(data, length, now) && phase == "reserved") {
+            setPhase("live", null)
+        }
     }
 
     private fun onAudio(data: ByteArray, length: Int, address: String, now: Long) {
@@ -603,18 +648,18 @@ class StreamEngine(
         lastConfigNanos = now
         val requestSeq = configSeq++
         sendBinary(
-            Wire.message(Wire.R6CF, session, requestSeq, settings.fps, settings.rate),
+            Wire.message(Wire.R6CF, session, requestSeq, settings.fps, rate.requested),
             address,
             peerPort,
         )
         sendBinary(
-            Wire.message(Wire.R10C, session, requestSeq, settings.fps, settings.rate, 1),
+            Wire.message(Wire.R10C, session, requestSeq, settings.fps, rate.requested, 1),
             address,
             peerPort,
         )
         if (peerSupportsQuality) {
             sendBinary(
-                Wire.message(Wire.R16C, session, requestSeq, settings.fps, settings.rate, 1, settings.quality),
+                Wire.message(Wire.R16C, session, requestSeq, settings.fps, rate.requested, 1, settings.quality),
                 address,
                 peerPort,
             )
@@ -713,6 +758,9 @@ class StreamEngine(
             "packet_loss_percent" to 0.0,
             "window_seconds" to seconds,
         )
+        if (settings.adaptive && pairs > 0 && rate.observe(completeFps, settings.fps, seconds) != null) {
+            sendConfiguration(force = true)
+        }
         events(mapOf("type" to "stats", "stats" to stats))
         if (seconds >= 4) {
             events(mapOf("type" to "diagnostics", "window" to stats))
@@ -738,6 +786,7 @@ class StreamEngine(
         "repair_packets" to repairPackets.toInt(),
         "quality" to lastQuality,
         "cap_bytes" to cap,
+        "requested_rate" to rate.requested,
         "settings" to settings.toString(),
     )
 }

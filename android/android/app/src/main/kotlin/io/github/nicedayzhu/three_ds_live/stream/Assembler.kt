@@ -39,7 +39,25 @@ class Assembler(
         var seen = false
     }
 
+    private class ScreenPartial(
+        val seq: Int,
+        val pts: Long,
+        val fps: Int,
+        val screen: Int,
+        val length: Int,
+        val chunks: Int,
+        val now: Long,
+    ) {
+        val chunksData = arrayOfNulls<ByteArray>(chunks)
+        val parity = arrayOfNulls<ByteArray>(2)
+        val parityLength = IntArray(2)
+        var received = 0
+        var lastProgress = now
+    }
+
     private val partials = LinkedHashMap<Int, Partial>()
+    private val screenPartials = LinkedHashMap<Int, ScreenPartial>()
+    private val readyScreens = HashMap<Int, ByteArray>()
     private val completedRing = ArrayDeque<Int>()
     var combined = false
         private set
@@ -52,6 +70,8 @@ class Assembler(
 
     fun reset() {
         partials.clear()
+        screenPartials.clear()
+        readyScreens.clear()
         completedRing.clear()
         combined = false
         pairsCompleted = 0
@@ -215,6 +235,110 @@ class Assembler(
             partial.repairRequested = true
             onNeedRepair(partial.seq, partial.pts, missing.toIntArray())
         }
+    }
+
+    /** R3P2/R3F2: one screen per sequence, two XOR stripes per screen. */
+    fun submitPerScreen(data: ByteArray, length: Int, now: Long): Boolean {
+        if (length < Wire.HEADER_R10) return false
+        val tag = Wire.tag(data, length)
+        if (tag != Wire.R3P2 && tag != Wire.R3F2) return false
+        val session = Wire.int(data, 4)
+        val seq = Wire.int(data, 8)
+        val pts = Wire.u32(data, 12)
+        val screen = Wire.int(data, 16)
+        val screenLength = Wire.int(data, 20)
+        val offset = Wire.int(data, 24)
+        val fps = Wire.int(data, 28)
+        if (screen !in 0..1) return false
+        if (screenLength !in 12..Wire.MAX_SCREEN_BYTES) return false
+        if (fps !in intArrayOf(15, 20, 24, 30, 35, 40)) return false
+        if (completedRing.contains(seq)) return false
+        val chunks = (screenLength + Wire.CHUNK - 1) / Wire.CHUNK
+        val key = seq * 2 + screen
+        // R3P2 carries a byte offset; R3F2 reuses that word for the stripe index.
+        val stripe = if (tag == Wire.R3F2) offset else -1
+        val index = offset / Wire.CHUNK
+        if (tag == Wire.R3P2 && offset % Wire.CHUNK != 0) return false
+
+        var partial = screenPartials[key]
+        if (partial == null) {
+            if (tag == Wire.R3F2) return false
+            partial = ScreenPartial(seq, pts, fps, screen, screenLength, chunks, now)
+            screenPartials[key] = partial
+        } else if (partial.length != screenLength) {
+            return false
+        }
+
+        if (tag == Wire.R3F2) {
+            if (stripe !in 0..1) return false
+            val payload = length - Wire.HEADER_R10
+            if (payload <= 0) return false
+            if (partial.parity[stripe] == null) {
+                partial.parity[stripe] = ByteArray(Wire.CHUNK)
+                partial.parityLength[stripe] = payload
+                System.arraycopy(data, Wire.HEADER_R10, partial.parity[stripe]!!, 0, payload)
+                recoverScreen(partial, stripe, now)
+            }
+        } else {
+            if (index >= chunks) return false
+            if (partial.chunksData[index] == null) {
+                val payload = length - Wire.HEADER_R10
+                if (payload <= 0) return false
+                val copy = ByteArray(payload)
+                System.arraycopy(data, Wire.HEADER_R10, copy, 0, payload)
+                partial.chunksData[index] = copy
+                partial.received++
+                partial.lastProgress = now
+                recoverScreen(partial, index % 2, now)
+            }
+        }
+        if (partial.received == partial.chunks) {
+            val joined = ByteArray(partial.length)
+            var write = 0
+            for (i in partial.chunksData.indices) {
+                val chunk = partial.chunksData[i] ?: return true
+                System.arraycopy(chunk, 0, joined, write, chunk.size)
+                write += chunk.size
+            }
+            screenPartials.remove(key)
+            readyScreens[key] = joined
+            val top = readyScreens[seq * 2]
+            val bottom = readyScreens[seq * 2 + 1]
+            if (top != null && bottom != null) {
+                readyScreens.remove(seq * 2)
+                readyScreens.remove(seq * 2 + 1)
+                pairsCompleted++
+                remember(seq)
+                onComplete(Pair(seq, partial.pts, partial.fps, top, bottom, false, now))
+            }
+        }
+        return true
+    }
+
+    private fun recoverScreen(partial: ScreenPartial, stripe: Int, now: Long) {
+        val parity = partial.parity[stripe] ?: return
+        var missing = -1
+        for (i in partial.chunksData.indices) {
+            if (i % 2 != stripe) continue
+            if (partial.chunksData[i] == null) {
+                if (missing >= 0) return
+                missing = i
+            }
+        }
+        if (missing < 0) return
+        val recovered = parity.copyOf()
+        for (i in partial.chunksData.indices) {
+            if (i == missing || i % 2 != stripe) continue
+            val chunk = partial.chunksData[i] ?: continue
+            for (b in chunk.indices) recovered[b] = (recovered[b].toInt() xor chunk[b].toInt()).toByte()
+        }
+        val remaining = partial.length - missing * Wire.CHUNK
+        val expected = if (remaining > Wire.CHUNK) Wire.CHUNK else remaining
+        if (expected <= 0) return
+        partial.chunksData[missing] = recovered.copyOf(expected)
+        partial.received++
+        recoveredChunks++
+        partial.lastProgress = now
     }
 
     fun hasRecent(seq: Int): Boolean = completedRing.contains(seq)
