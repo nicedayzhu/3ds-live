@@ -157,6 +157,8 @@ class StreamEngine(
     private var windowStarted = 0L
     private var windowRowsSaved = 0L
     private var windowRowsTotal = 0L
+    private var lastAudioGaps = 0L
+    private var lastAudioLate = 0L
     private var windowLz4Saved = 0L
     private var windowLz4Total = 0L
     private var windowAudioGaps = 0L
@@ -906,6 +908,10 @@ class StreamEngine(
         val completeFps = windowPairs / seconds
         val received = windowBytes / seconds
         val sent = windowSentBytes / seconds
+        val gapDelta = audio.gapBlocks - lastAudioGaps
+        val lateDelta = audio.lateBlocks - lastAudioLate
+        lastAudioGaps = audio.gapBlocks
+        lastAudioLate = audio.lateBlocks
         val rowPercent = if (windowRowsTotal > 0) windowRowsSaved.toDouble() / windowRowsTotal else 0.0
         val lz4Percent = if (windowLz4Total > 0) windowLz4Saved.toDouble() / windowLz4Total else 0.0
         val stats = mapOf(
@@ -922,13 +928,27 @@ class StreamEngine(
             "row_savings_percent" to (rowPercent * 100.0),
             "lz4_savings_percent" to (lz4Percent * 100.0),
             "audio_seconds" to (audio.blocksPlayed * AudioPlayer.BLOCK_SAMPLES / AudioPlayer.SOURCE_RATE),
-            "audio_gap_seconds" to (audio.droppedBlocks * AudioPlayer.BLOCK_SAMPLES / AudioPlayer.SOURCE_RATE),
+            "audio_gap_seconds" to (audio.gapBlocks * AudioPlayer.BLOCK_SAMPLES / AudioPlayer.SOURCE_RATE),
+            "audio_gap_blocks" to audio.gapBlocks.toDouble(),
+            "audio_late_blocks" to audio.lateBlocks.toDouble(),
+            "audio_underruns" to audio.underrunCount.toDouble(),
+            "audio_dropped_blocks" to audio.droppedBlocks.toDouble(),
             "buffer_ms" to settings.bufferMs.toDouble(),
             "packet_loss_percent" to 0.0,
             "window_seconds" to seconds,
         )
-        if (settings.adaptive && pairs > 0 && rate.observe(completeFps, settings.fps, seconds) != null) {
-            sendConfiguration(force = true)
+        if (settings.adaptive && pairs > 0) {
+            val audioLoss = if (gapDelta >= 3 || lateDelta >= 12) rate.notifyAudioLoss() else null
+            val fpsChange = rate.observe(completeFps, settings.fps, seconds)
+            if (audioLoss != null || fpsChange != null) {
+                if (gapDelta >= 3 || lateDelta >= 12) {
+                    Logs.w(
+                        TAG,
+                        "audio loss window: gaps=$gapDelta late=$lateDelta, rate=${rate.requested}",
+                    )
+                }
+                sendConfiguration(force = true)
+            }
         }
         events(mapOf("type" to "stats", "stats" to stats))
         if (seconds >= 4) {

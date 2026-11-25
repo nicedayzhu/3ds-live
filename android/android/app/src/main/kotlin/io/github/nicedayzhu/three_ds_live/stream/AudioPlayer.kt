@@ -64,6 +64,9 @@ class AudioPlayer {
         private set
     var droppedBlocks = 0L
         private set
+    val gapBlocks: Long get() = gaps
+    val lateBlocks: Long get() = reordered
+    val underrunCount: Long get() = underruns
 
     fun start() {
         if (running.getAndSet(true)) return

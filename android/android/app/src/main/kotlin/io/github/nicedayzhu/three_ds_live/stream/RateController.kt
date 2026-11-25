@@ -27,6 +27,16 @@ class RateController(private val floor: Int = 400_000) {
         if (requested < floor) requested = floor
     }
 
+    /** Backs off quickly when audio blocks are being lost: audio is small and cheap
+     *  to protect, and freeing airtime lowers loss for both streams. */
+    fun notifyAudioLoss(): Int? {
+        if (requested <= floor) return null
+        requested = (requested * 3 / 4).coerceAtLeast(floor)
+        quietWindows = 0
+        healthyWindows = 0
+        return requested
+    }
+
     /**
      * @param completeFps pairs completed in the window divided by its seconds
      * @return the new requested rate when it changed, otherwise null
