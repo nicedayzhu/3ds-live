@@ -46,6 +46,20 @@ Flutter (Dart)                          Kotlin (前台服务)
 | `StreamService.kt` | 前台服务与通知 |
 | `MainActivity.kt` | 通道接线、权限/服务启动、设置持久化 |
 
+## 快速验证
+
+```powershell
+$adb = 'F:\work\music_online_apk\.toolchains\android-sdk\platform-tools\adb.exe'
+& $adb install -r build\app\outputs\flutter-apk\app-debug.apk
+& $adb logcat -s 3ds-live AndroidRuntime:E
+```
+
+- **没有掌机也想看界面**：用 `--dart-define=THREEDS_MOCK=true` 构建（本仓库已生成 `app-debug-mock.apk`），App 会进入演示模式，设备列表、直播页、诊断、画质弹层都能操作。
+- **Android 单独接收**：先确认 PC 播放器已停止；掌机进就绪画面按 `R + SELECT`；App 点“开始寻找掌机”。正常日志依次出现 `started on udp 8001`、`peer=<ip>:<port> session=…`、`phase=live`、`pairs=1 …`。
+- **PC 单独接收**：先停掉手机端，运行 `dist/Windows/3DS-Live.exe`，按 `F12` 看对齐窗口。
+- **互斥**：两端同时开只有一台拿到画面，另一台 8 秒后出现提示；停掉接收端后，另一台在 4–8 秒内接管。
+- **录制**：直播页 ⏺ → 停止，Android 10+ 在相册 `Movies/3DS Live`；PC 用 `Ctrl+R`。
+
 ## 与 PC 的互斥
 
 掌机同一时刻只连接一个接收端（协议只有单 peer）。PC 播放器与手机 App 各自都能独立接收，但同时开只有先应答的一方拿到画面；另一台会停在“正在寻找掌机”。切换时先在旧设备停止，掌机 4 秒租约到期后会重新广播。

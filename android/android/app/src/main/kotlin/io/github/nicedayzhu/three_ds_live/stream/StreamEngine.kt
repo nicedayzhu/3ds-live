@@ -3,6 +3,7 @@ package io.github.nicedayzhu.three_ds_live.stream
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.SystemClock
+import android.util.Log
 import io.flutter.view.TextureRegistry
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -57,6 +58,10 @@ class StreamEngine(
                 return settings
             }
         }
+    }
+
+    companion object {
+        private const val TAG = "3ds-live"
     }
 
     private val sink = VideoSink(context, registry) { quality, _, _ ->
@@ -141,6 +146,7 @@ class StreamEngine(
     private var lastMediaAt = 0L
 
     private var cap = 0
+    private var parseFailures = 0
     private val rate = RateController()
     private var deviceSentBytes = 0L
     private var deviceAppliedQuality = 0
@@ -176,9 +182,12 @@ class StreamEngine(
         } catch (error: Throwable) {
             running.set(false)
             audio.stop()
+            Log.e(TAG, "bind udp ${settings.port} failed: ${error.message}")
             setPhase("error", "无法监听 UDP ${settings.port}：${error.message}")
             return
         }
+        Log.i(TAG, "started on udp ${settings.port}, layout=${settings.layout}, "
+            + "fps=${settings.fps}, rate=${settings.rate}, quality=${settings.quality}")
         setPhase("inviting", null)
         receiveThread = Thread({ receiveLoop() }, "3ds-live-rx").apply { start() }
         tickThread = Thread({ tickLoop() }, "3ds-live-tick").apply { start() }
@@ -201,6 +210,7 @@ class StreamEngine(
         session = 0
         resolver.reset()
         assembler.reset()
+        Log.i(TAG, "stopped")
         setPhase("idle", null)
     }
 
@@ -238,6 +248,7 @@ class StreamEngine(
         val scale = if (settings.recordResolution == "1080p") 1.5 else 1.0
         val width = even(sink.layout.width * scale)
         val height = even(sink.layout.height * scale)
+        Log.i(TAG, "recording ${width}x$height at ${settings.recordBitrate} bps")
         val path = recorder.start(width, height, settings.recordBitrate, withAudio = !settings.muted)
         if (path != null) {
             sink.setRecordSurface(recorder.surface)
@@ -253,6 +264,7 @@ class StreamEngine(
         sink.setRecordSurface(null)
         audio.pcmSink = null
         if (wasRecording) {
+            Log.i(TAG, "recording stopped: $path")
             events(mapOf("type" to "recording", "active" to false, "path" to path))
         }
         return path
@@ -312,8 +324,12 @@ class StreamEngine(
             val now = SystemClock.elapsedRealtimeNanos()
             try {
                 handleDatagram(packet, now)
-            } catch (_: Throwable) {
+            } catch (error: Throwable) {
                 // A malformed datagram must never kill the receive loop.
+                if (parseFailures < 3) {
+                    Log.w(TAG, "datagram ${packet.length}B tag=${Wire.tag(packet.data, packet.length)}: ${error.message}")
+                    parseFailures++
+                }
             }
         }
     }
@@ -354,6 +370,7 @@ class StreamEngine(
         if (selected != null && selected != address) return
         if (replyChallenge != challenge && replyChallenge != previousChallenge) return
         if (session != 0 && replySession != session && phase == "live") return
+        Log.i(TAG, "peer=$address:$port session=${replySession.toString(16)}")
         peerIp = address
         peerPort = port
         if (replySession != session) {
@@ -537,7 +554,14 @@ class StreamEngine(
         if (top == null && bottom == null) return
         val topBitmap = top?.let { sink.decode(it.jpeg) }
         val bottomBitmap = bottom?.let { sink.decode(it.jpeg) }
-        if (topBitmap == null && bottomBitmap == null) return
+        if (topBitmap == null && bottomBitmap == null) {
+            if (pairs <= 3) Log.w(TAG, "pair $pair.seq decoded no bitmap (top=${top != null}, bottom=${bottom != null})")
+            return
+        }
+        if (pairs == 1L || pairs % 300L == 0L) {
+            Log.i(TAG, "pairs=$pairs top=${topBitmap?.width}x${topBitmap?.height} "
+                + "bottom=${bottomBitmap?.width}x${bottomBitmap?.height} q=${top?.quality}")
+        }
         sink.present(topBitmap, bottomBitmap, top?.quality ?: 0, bottom?.quality ?: 0)
         if (pair.usedRepair) repairedPairs++
         recordRowSavings(pair, top, bottom)
@@ -575,6 +599,7 @@ class StreamEngine(
         if (peerSupportsRepair <= 0 || indices.isEmpty()) return
         if (indices.size > peerSupportsRepair) return
         repairRequests++
+        Log.d(TAG, "repair seq=$seq indices=${indices.joinToString(",")}")
         val buffer = java.nio.ByteBuffer.allocate(20 + indices.size)
             .order(java.nio.ByteOrder.LITTLE_ENDIAN)
         buffer.put(Wire.R19N.toByteArray(Charsets.US_ASCII))
@@ -736,6 +761,7 @@ class StreamEngine(
         if (phase == next && message == note) return
         phase = next
         message = note
+        Log.i(TAG, "phase=$next${if (note != null) " note=$note" else ""}")
         emitState()
     }
 

@@ -18,7 +18,8 @@ class ThreeDsLiveApp extends StatefulWidget {
 }
 
 class _ThreeDsLiveAppState extends State<ThreeDsLiveApp> {
-  final LiveController _controller = LiveController();
+  static const bool _mock = bool.fromEnvironment('THREEDS_MOCK');
+  final LiveController _controller = LiveController(mock: _mock);
   ThemeMode _themeMode = ThemeMode.system;
 
   @override
