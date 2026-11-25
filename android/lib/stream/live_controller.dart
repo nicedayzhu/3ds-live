@@ -229,7 +229,7 @@ class LiveController extends ChangeNotifier {
     if (mockMode) return null;
     try {
       return await _bridge.exportLog();
-    } on PlatformException catch (_) {
+    } catch (_) {
       return null;
     }
   }

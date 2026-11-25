@@ -12,6 +12,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.github.nicedayzhu.three_ds_live.stream.EngineHolder
+import io.github.nicedayzhu.three_ds_live.stream.Logs
 import io.github.nicedayzhu.three_ds_live.stream.StreamEngine
 
 class MainActivity : FlutterActivity() {
@@ -107,6 +108,14 @@ class MainActivity : FlutterActivity() {
                 "viewAttached" -> {
                     engine?.onViewAttached()
                     result.success(null)
+                }
+                "exportLog" -> {
+                    try {
+                        result.success(Logs.export(applicationContext))
+                    } catch (error: Throwable) {
+                        Logs.e("3ds-live", "export log failed", error)
+                        result.error("export", error.message, null)
+                    }
                 }
                 "setKeepScreenOn" -> {
                     val on = call.arguments as? Boolean ?: false
