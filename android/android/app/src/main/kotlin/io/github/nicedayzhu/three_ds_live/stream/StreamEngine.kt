@@ -813,11 +813,7 @@ class StreamEngine(
         }
     }
 
-    private fun screenMask(): Int = when (settings.layout) {
-        "topOnly" -> 1
-        "bottomOnly" -> 2
-        else -> 3
-    }
+    private fun screenMask(): Int = 3
 
     private fun applyScreenMask() {
         assembler.requiredPanels = screenMask()

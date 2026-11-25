@@ -49,8 +49,10 @@ static int pictureScale(const QString &mode, int requested) {
     if (isNativeDetail(mode)) return 1;
     return requested;
 }
-static int layoutMask(const QString &layout) {
-    return layout == "top-only" ? 1 : layout == "bottom-only" ? 2 : 3;
+static int layoutMask(const QString &) {
+    // Display layout is a client-side crop. The sender always streams both
+    // panels so switching to a single-screen view cannot freeze it.
+    return 3;
 }
 bool validIp(const QString &ip) {
     return ip.isEmpty() || QHostAddress(ip).protocol() == QAbstractSocket::IPv4Protocol;
@@ -449,7 +451,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                 if (layoutChanged) {
                     o.layout = nextLayout;
                     receiver->configure(o.fps, o.rate, o.jpegQuality, o.adaptiveRate,
-                                        nextLayout == "top-only" ? 1 : nextLayout == "bottom-only" ? 2 : 3);
+                                        3);
                     notify(nextLayout == "top-only" ? "仅上屏：已释放下屏编码与带宽" :
                            nextLayout == "bottom-only" ? "仅下屏：已释放上屏编码与带宽" : "已恢复上下双屏");
                 }
