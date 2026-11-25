@@ -34,6 +34,7 @@ class StreamEngine(
         var quality: Int = 0,
         var adaptive: Boolean = true,
     var audioPriority: Boolean = true,
+    var bottomFps: Int = 8,
         var bufferMs: Int = 100,
         var layout: String = "stacked",
         var muted: Boolean = false,
@@ -53,6 +54,9 @@ class StreamEngine(
                 (map["jpeg_quality"] as? Number)?.let { settings.quality = it.toInt() }
                 (map["adaptive_rate"] as? Boolean)?.let { settings.adaptive = it }
         (map["audio_priority"] as? Boolean)?.let { settings.audioPriority = it }
+        (map["bottom_fps"] as? Number)?.toInt()?.let {
+            settings.bottomFps = when (it) { 0, 5, 8, 10, 15, 30 -> it; else -> 8 }
+        }
                 (map["buffer_ms"] as? Number)?.let { settings.bufferMs = it.toInt() }
                 (map["layout"] as? String)?.let { settings.layout = it }
                 (map["muted"] as? Boolean)?.let { settings.muted = it }
@@ -827,6 +831,11 @@ class StreamEngine(
         )
         sendBinary(
             Wire.message(Wire.R10C, session, requestSeq, settings.fps, rate.requested, 1),
+            address,
+            peerPort,
+        )
+        sendBinary(
+            Wire.message(Wire.R22C, session, settings.bottomFps),
             address,
             peerPort,
         )

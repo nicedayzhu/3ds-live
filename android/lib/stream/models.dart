@@ -180,6 +180,7 @@ class StreamSettings {
     this.jpegQuality = 0,
     this.adaptiveRate = true,
     this.audioPriority = true,
+    this.bottomFps = 8,
     this.bufferMs = 100,
     this.layout = VideoLayout.stacked,
     this.keepAwake = true,
@@ -198,6 +199,7 @@ class StreamSettings {
   final int jpegQuality;
   final bool adaptiveRate;
   final bool audioPriority;
+  final int bottomFps;
   final int bufferMs;
   final VideoLayout layout;
   final bool keepAwake;
@@ -216,6 +218,7 @@ class StreamSettings {
     int? jpegQuality,
     bool? adaptiveRate,
     bool? audioPriority,
+    int? bottomFps,
     int? bufferMs,
     VideoLayout? layout,
     bool? keepAwake,
@@ -234,6 +237,7 @@ class StreamSettings {
       jpegQuality: jpegQuality ?? this.jpegQuality,
       adaptiveRate: adaptiveRate ?? this.adaptiveRate,
       audioPriority: audioPriority ?? this.audioPriority,
+      bottomFps: bottomFps ?? this.bottomFps,
       bufferMs: bufferMs ?? this.bufferMs,
       layout: layout ?? this.layout,
       keepAwake: keepAwake ?? this.keepAwake,

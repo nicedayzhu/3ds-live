@@ -91,6 +91,15 @@ class SettingsPage extends StatelessWidget {
             },
           ),
           _SegmentRow<int>(
+            title: '下屏刷新率',
+            subtitle: '降低下屏帧率可把 CPU 留给上屏；关闭则冻结下屏',
+            values: const [30, 15, 8, 0],
+            selected: settings.bottomFps,
+            label: (value) => value == 0 ? '关闭' : '$value fps',
+            onChanged: (value) =>
+                update(settings.copyWith(bottomFps: value)),
+          ),
+          _SegmentRow<int>(
             title: '播放缓冲',
             subtitle: '更大更稳，但延迟更高',
             values: const [60, 100, 160],
