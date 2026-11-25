@@ -326,9 +326,9 @@ class Viewer final : public QWidget {
             rows << QString("源帧 %1   ·   生成 %2   ·   合计 %3 FPS")
                         .arg(number("fps_source_presented", 1), number("fps_generated", 1), number("fps_presented", 1))
                  << QString("运动补帧 %1   ·   缓冲 %2 ms").arg(motionName, number("playout_delay_ms"))
-                 << QString("掌机发送 %1   ·   上 %2 / 下 %3 FPS   ·   双屏收齐 %4")
+                 << QString("掌机发送 %1 对/s   ·   上屏 %2   ·   下屏新帧 %3 FPS   ·   双屏收齐 %4")
                         .arg(number("device_sent_fps", 1), number("device_sent_top_fps", 1),
-                             number("device_sent_bottom_fps", 1), number("fps_received", 1))
+                             number("device_bottom_new_fps", 1), number("fps_received", 1))
                  << QString("掌机编码 上 %1 / 下 %2 FPS   ·   下屏复用 %3%")
                         .arg(number("device_encoded_top_fps", 1), number("device_encoded_bottom_fps", 1),
                              number("device_bottom_reuse_percent", 0))

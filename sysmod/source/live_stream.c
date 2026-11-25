@@ -294,7 +294,7 @@ static void compress_bottom(RowPairPlan *plan,RowAnchor *base,u64 nextEncode) {
 /* Only the encoder writes the two anchor banks, at publication. The network
  * thread can acknowledge a bank during an encode but cannot change its bytes. */
 static void measure_pair(RowPairPlan *plan,unsigned q,bool combined,bool useRows,
-                         const RowAnchor *base,const RowAnchor *probe) {
+                         const RowAnchor *base,const RowAnchor *probe,bool bottomRows) {
     *plan=(RowPairPlan){.valid=useRows};
     for(unsigned sc=0;sc<2;sc++) {
         unsigned qs=(sc==1&&q>BOTTOM_QUALITY)?BOTTOM_QUALITY:q;
@@ -308,6 +308,9 @@ static void measure_pair(RowPairPlan *plan,unsigned q,bool combined,bool useRows
             plan->valid=false;
     }
     if(plan->valid)for(unsigned sc=0;sc<2;sc++) {
+        /* A decimated bottom must be byte-identical between due frames so the PC
+         * can skip decoding it; row deltas would carry a new sequence each pair. */
+        if(sc==1&&!bottomRows)continue;
         if(base)plan->wire[sc]=row_size(plan,sc,base);
         if(probe)plan->trialSize+=row_size(plan,sc,probe);
     }
@@ -441,7 +444,8 @@ static void encoder(void *arg) {
         bool combined=combinedFec;
         unsigned targetQ=qualityTarget;
         bool useRows=rowsEnabled&&combined&&compactJpeg;
-        bool useR20=useRows&&r20_recent(now);
+        bool bottomRows=bottomFps>=jobFps;
+        bool useR20=useRows&&bottomRows&&r20_recent(now);
         RowAnchor *base=useRows?rowBase:NULL;
         RowAnchor *probe=useRows?rowProbe:NULL;
         LightLock_Unlock(&lock);
@@ -494,7 +498,7 @@ static void encoder(void *arg) {
                 budget=pair_payload_budget(jobRate,jobFps,combined,targetQ);
                 targetBytes=budget*payloadControl.percent/100;
             }
-            measure_pair(&plan,q,combined||targetQ,useRows,base,probe);
+            measure_pair(&plan,q,combined||targetQ,useRows,base,probe,bottomRows);
             if(useR20&&plan.valid)compress_bottom(&plan,base,next);
             u32 total=plan.wire[0]+plan.wire[1];
             if(jobSize[0]&&jobSize[1]&&total<=budget)break;
