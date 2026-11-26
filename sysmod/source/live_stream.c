@@ -4,6 +4,7 @@
 #include "live_audio_sender.h"
 #include "live_control.h"
 #include "live_stats.h"
+#include "live_status.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -1439,48 +1440,47 @@ static void control(u64 *due)
 	now = svcGetSystemTick();
 	if (!mediaReady || now - lastStatusTick < SYSCLOCK_ARM11)
 		return;
-	u8 msg[108];
-	const u32 msgBytes = audioEnabled ? 108 : 76;
-	memcpy(msg, audioEnabled ? "R9ST" : "R7ST", 4);
-	const u32 values[] = {
-	    session,
-	    (u32)((now - started) * 1000 / SYSCLOCK_ARM11),
-	    rate,
-	    live_av_video_rate(rate, audioEnabled),
-	    fps,
-	    live_encoded_frames(0),
-	    live_encoded_frames(1),
-	    frames[0],
-	    frames[1],
-	    errors,
-	    expired,
-	    feedbackCount,
-	    (u32)encoderCores[0],
-	    (u32)encoderCores[1],
-	    __atomic_load_n(&lastEncodeUs[0], __ATOMIC_RELAXED),
-	    __atomic_load_n(&lastEncodeUs[1], __ATOMIC_RELAXED),
-	    LIVE_MAX_RATE,
-	    LIVE_FPS_MASK,
-	    audioEnabled ? 1u : 0u,
-	    LIVE_AUDIO_RATE_MHZ,
-	    LIVE_AUDIO_CHANNELS,
-	    LIVE_AUDIO_SAMPLES,
-	    __atomic_load_n(&audio.queue.queued, __ATOMIC_RELAXED),
-	    __atomic_load_n(&audio.queue.dropped, __ATOMIC_RELAXED) +
+	struct live_status_main status = {
+	    .session = session,
+	    .duration_ms = (u32)((now - started) * 1000 / SYSCLOCK_ARM11),
+	    .rate = rate,
+	    .video_rate = live_av_video_rate(rate, audioEnabled),
+	    .fps = fps,
+	    .encoded_top = live_encoded_frames(0),
+	    .encoded_bottom = live_encoded_frames(1),
+	    .sent_top = frames[0],
+	    .sent_bottom = frames[1],
+	    .send_errors = errors,
+	    .expired_pairs = expired,
+	    .feedback_count = feedbackCount,
+	    .encoder_core_top = encoderCores[0],
+	    .encoder_core_bottom = encoderCores[1],
+	    .last_encode_us_top =
+		__atomic_load_n(&lastEncodeUs[0], __ATOMIC_RELAXED),
+	    .last_encode_us_bottom =
+		__atomic_load_n(&lastEncodeUs[1], __ATOMIC_RELAXED),
+	    .audio_enabled = audioEnabled,
+	    .audio_blocks_queued =
+		__atomic_load_n(&audio.queue.queued, __ATOMIC_RELAXED),
+	    .audio_blocks_dropped =
+		__atomic_load_n(&audio.queue.dropped, __ATOMIC_RELAXED) +
 		__atomic_load_n(&audio.queue.expired, __ATOMIC_RELAXED),
-	    audio.packets_sent,
-	    live_audio_queue_depth(&audio.queue)};
-	for (unsigned i = 0; i < (msgBytes - 4) / 4; i++)
-		put32(msg + 4 + 4 * i, values[i]);
+	    .audio_packets_sent = audio.packets_sent,
+	    .audio_queue_depth = live_audio_queue_depth(&audio.queue),
+	};
+	u8 msg[108];
+	const u32 msgBytes =
+	    (u32)live_status_main_build(msg, sizeof(msg), &status);
+	const u32 durationMs = status.duration_ms;
 	uint32_t pacingWords[LIVE_PACING_WORDS];
-	live_packet_snapshot(&packetReport, pacingWords, session, values[1],
+	live_packet_snapshot(&packetReport, pacingWords, session, durationMs,
 			     pacingMode, started, SYSCLOCK_ARM11);
 	lastStatusTick = send_status(due, msg, msgBytes);
 	memcpy(msg, "R16S", 4);
 	put32(msg + 4, session);
 	put32(msg + 8, 1);
 	put32(msg + 12, qualityTarget);
-	put32(msg + 16, values[1]);
+	put32(msg + 16, durationMs);
 	send_status(due, msg, 20);
 	memcpy(msg, "R16Q", 4);
 	put32(msg + 4, session);
@@ -1492,7 +1492,7 @@ static void control(u64 *due)
 	 * 2^32. */
 	memcpy(msg, "R17T", 4);
 	put32(msg + 4, session);
-	put32(msg + 8, values[1]);
+	put32(msg + 8, durationMs);
 	put32(msg + 12, (u32)(audio.wire_bytes + videoWireBytes));
 	put32(msg + 16, (u32)videoWireBytes);
 	send_status(due, msg, 20);
@@ -1518,7 +1518,7 @@ static void control(u64 *due)
 	LightLock_Unlock(&lock);
 	const u32 timing[] = {
 	    session,
-	    values[1],
+	    durationMs,
 	    overwritten,
 	    rowRepeats,
 	    repairRequests,
