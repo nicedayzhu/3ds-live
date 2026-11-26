@@ -35,8 +35,24 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* Encoder 0 coordinates pairs, encoder 1 handles bottom. The socket worker
- * owns the socket and claims queued pairs in capture order. */
+/* Encoder 0 coordinates counters.pairs, encoder 1 handles bottom. The socket
+ * worker owns the socket and claims queued counters.pairs in capture order. */
+struct stream_counters {
+	u32 attempts[2], jpeg_frames[2], max_us[2], max_bytes[2];
+	u32 convert_count[2], convert_max_us[2];
+	u64 sum_us[2], convert_sum_us[2], changed_mcus[2], converted_mcus[2];
+	u64 snapshot_sum_us;
+	u32 snapshot_count, snapshot_max_us;
+	u32 source_reuse[2], last_source[2], frames[2];
+	u32 replaced, errors, expired, oversize, retries, pairs;
+	u32 send_calls, send_max_us, last_encode_us[2];
+	u32 feedback_count, config_changes, rate_pending_kept,
+	    rate_encoding_kept;
+	u64 send_sum_us, video_wire_bytes, compact_saved_bytes;
+	u32 compact_frames, compact_fallbacks;
+	u32 manual_render_failures, manual_wire_drops;
+};
+static struct stream_counters counters;
 #define MAX_JPEG LIVE_JPEG_MAX_BYTES
 static LiveJpegSource *rawSources[2];
 static LiveJpegFrame *rawWorking[2];
@@ -80,23 +96,13 @@ static u32 jobKind, jobQuality, jobDone, jobSize[2], jobChanged[2], jobUs[2];
  * hidden encoder entirely and sends per-screen packets, so both ARM11 time and
  * airtime are released instead of rendering a panel nobody displays. */
 static u32 screenMask = 3;
-static u32 attempts[2], jpegFrames[2], maxUs[2], maxBytes[2], convertCount[2],
-    convertMaxUs[2];
-static u64 sumUs[2], convertSumUs[2], changedMcus[2];
-static u64 convertedMcus[2], snapshotSumUs;
-static u32 snapshotCount, snapshotMaxUs;
-static u32 sourceReuse[2], lastSource[2], frames[2], replaced, errors, expired,
-    oversize, retries, pairs;
-static u32 sendCalls, sendMaxUs, lastEncodeUs[2], feedbackCount, configChanges;
 /* Socket-thread owned. Mode 0 is the original submission-start byte clock. */
 static unsigned pacingMode = 1;
 static LivePacketReport packetReport;
-static u32 ratePendingKept, rateEncodingKept;
-static u64 sendSumUs, lastStatusTick, lastControlTick, videoWireBytes;
-static u64 compactSavedBytes;
-static u32 compactFrames, compactFallbacks;
-/* Each optional reference bank holds up to 180 KiB. Larger pairs can still
- * travel as independent JPEGs within the per-screen and receive limits. */
+static u64 lastStatusTick, lastControlTick;
+/* Each optional reference bank holds up to 180 KiB. Larger counters.pairs can
+ * still travel as independent JPEGs within the per-screen and receive limits.
+ */
 static struct row_anchor *rowBanks, *rowBase, *rowCandidate, *rowProbe;
 /* Only the encoder builds/reuses this dictionary. Acknowledging a new
  * reference changes rowBase, but never modifies either bank's bytes. */
@@ -110,7 +116,6 @@ static bool rowsEnabled;
 static unsigned rowSends;
 static u64 rowLastKey, rowLastAck, rowBytesSaved;
 static u32 rowKeys, rowRepeats, rowDeltas, rowAcks;
-static u32 manualRenderFailures, manualWireDrops;
 static struct live_audio_sender audio;
 static u32 get32(const u8 *p)
 {
@@ -202,7 +207,9 @@ bool live_receiver_has_video(void)
 }
 u32 live_encoded_frames(unsigned sc)
 {
-	return sc < 2 ? __atomic_load_n(&jpegFrames[sc], __ATOMIC_RELAXED) : 0;
+	return sc < 2 ? __atomic_load_n(&counters.jpeg_frames[sc],
+					__ATOMIC_RELAXED)
+		      : 0;
 }
 bool live_audio_active(void)
 {
@@ -276,13 +283,13 @@ static u32 pack_panel(unsigned sc, unsigned q, u8 *out, u32 capacity)
 					      jobSize[sc], sc ? 320 : 400, q)
 			: 0;
 	if (packed) {
-		compactFrames++;
-		compactSavedBytes += jobSize[sc] - packed;
+		counters.compact_frames++;
+		counters.compact_saved_bytes += jobSize[sc] - packed;
 		return (u32)packed;
 	}
 	memcpy(out, encoded[sc], jobSize[sc]);
 	if (compactJpeg)
-		compactFallbacks++;
+		counters.compact_fallbacks++;
 	return jobSize[sc];
 }
 
@@ -325,8 +332,8 @@ static void measure_pair(struct row_pair_plan *plan, unsigned q, bool combined,
 	if (plan->valid)
 		for (unsigned sc = 0; sc < 2; sc++) {
 			/* A decimated bottom must be byte-identical between due
-			 * frames so the PC can skip decoding it; row deltas
-			 * would carry a new sequence each pair. */
+			 * counters.frames so the PC can skip decoding it; row
+			 * deltas would carry a new sequence each pair. */
 			if (sc == 1 && !bottomRows)
 				continue;
 			if (base)
@@ -372,8 +379,8 @@ static bool needs_key(const struct row_pair_plan *plan, u64 now, u32 seq,
 		 */
 		if (wire <= 2 * LIVE_CHUNK)
 			return false;
-		rowCandidate =
-		    NULL; /* The previous unacknowledged offer has expired. */
+		rowCandidate = NULL; /* The previous unacknowledged offer has
+					counters.expired. */
 		rowProbe = rowBase == rowBanks ? rowBanks + 1 : rowBanks;
 		store_row_anchor(rowProbe, plan, seq, stamp);
 		rowTrial = (LiveRowTrial){0};
@@ -393,7 +400,8 @@ static bool needs_key(const struct row_pair_plan *plan, u64 now, u32 seq,
 
 /* Called with lock held. Full keys are eligible only when the complete wire
  * representation also fits the requested budget. Stale candidates are
- * replaced with a fresh capture rather than freezing the stream for an ACK. */
+ * counters.replaced with a fresh capture rather than freezing the stream for an
+ * ACK. */
 static void publish_rows(const struct row_pair_plan *plan,
 			 const struct row_anchor *base, LivePendingPair *pair,
 			 bool key, u64 now)
@@ -413,10 +421,11 @@ static void publish_rows(const struct row_pair_plan *plan,
 		u8 *out =
 		    pendingBytes + pair->offset + (sc ? pair->length[0] : 0);
 		if (plan->compact[sc]) {
-			compactFrames++;
-			compactSavedBytes += jobSize[sc] - plan->compact[sc];
+			counters.compact_frames++;
+			counters.compact_saved_bytes +=
+			    jobSize[sc] - plan->compact[sc];
 		} else
-			compactFallbacks++;
+			counters.compact_fallbacks++;
 		if (key) {
 			memcpy(out, row_anchor_panel(rowCandidate, sc),
 			       pair->length[sc]);
@@ -477,13 +486,13 @@ static void configure_stream(u32 hz, u32 bps, bool fec, unsigned targetQ)
 					     budget))
 			discard_pending(slot, TIMING_RECONFIGURED);
 		else
-			ratePendingKept++;
+			counters.rate_pending_kept++;
 	}
 	__atomic_store_n(&fps, hz, __ATOMIC_RELAXED);
 	rate = bps;
 	combinedFec = fec;
 	qualityTarget = targetQ;
-	configChanges++;
+	counters.config_changes++;
 	/* A new quality/rate invalidates the reused bottom JPEG. */
 }
 
@@ -527,7 +536,7 @@ static void encode_single_screen(u32 seq, u32 stamp, u32 epoch, u32 budget,
 		     : 0;
 	wire = packed ? (u32)packed : jobSize[sc];
 	if (!jobSize[sc] || wire > budget) {
-		oversize++;
+		counters.oversize++;
 		return;
 	}
 	incoming = (LivePendingPair){
@@ -539,7 +548,7 @@ static void encode_single_screen(u32 seq, u32 stamp, u32 epoch, u32 budget,
 	bytes = live_pending_bytes(&incoming);
 	while (!live_pending_fits(&pending, bytes, sizeof pendingBytes)) {
 		discard_pending(pending.head, TIMING_REPLACED);
-		replaced++;
+		counters.replaced++;
 	}
 	slot = live_pending_append(&pending, pendingBytes, sizeof pendingBytes,
 				   incoming);
@@ -585,7 +594,7 @@ static bool pair_requantize(struct pair_encode *e, struct row_pair_plan *plan,
 		    live_retry_quality(e->target_q, q, retry, total, budget);
 		if (next_q == q || capture_paused())
 			break;
-		retries++;
+		counters.retries++;
 		q = next_q;
 		if (!run_pair_job(2, q))
 			break;
@@ -607,28 +616,30 @@ static void pair_publish(struct pair_encode *e, struct row_pair_plan *plan,
 	uint32_t current_budget;
 
 	for (unsigned i = 0; i < 2; i++) {
-		attempts[i]++;
-		sumUs[i] += jobUs[i];
-		changedMcus[i] += jobChanged[i];
-		if (jobUs[i] > maxUs[i])
-			maxUs[i] = jobUs[i];
-		__atomic_store_n(&lastEncodeUs[i], jobUs[i], __ATOMIC_RELAXED);
+		counters.attempts[i]++;
+		counters.sum_us[i] += jobUs[i];
+		counters.changed_mcus[i] += jobChanged[i];
+		if (jobUs[i] > counters.max_us[i])
+			counters.max_us[i] = jobUs[i];
+		__atomic_store_n(&counters.last_encode_us[i], jobUs[i],
+				 __ATOMIC_RELAXED);
 		if (fits) {
-			__atomic_add_fetch(&jpegFrames[i], 1, __ATOMIC_RELAXED);
-			if (jobSize[i] > maxBytes[i])
-				maxBytes[i] = jobSize[i];
+			__atomic_add_fetch(&counters.jpeg_frames[i], 1,
+					   __ATOMIC_RELAXED);
+			if (jobSize[i] > counters.max_bytes[i])
+				counters.max_bytes[i] = jobSize[i];
 		}
 	}
 	quality = q;
 	if (!fits) {
 		if (e->target_q) {
 			if (!jobSize[0] || !jobSize[1])
-				manualRenderFailures++;
+				counters.manual_render_failures++;
 			else
-				manualWireDrops++;
+				counters.manual_wire_drops++;
 		}
 		live_timing_drop_encoded(TIMING_OVERSIZE);
-		oversize++;
+		counters.oversize++;
 		spare = 0;
 		return;
 	}
@@ -667,7 +678,7 @@ static void pair_publish(struct pair_encode *e, struct row_pair_plan *plan,
 		LivePendingPair *pair;
 
 		if (e->initial_rate != rate)
-			rateEncodingKept++;
+			counters.rate_encoding_kept++;
 		now = svcGetSystemTick();
 		key = e->use_rows &&
 		      needs_key(plan, now, e->seq, e->stamp, current_budget);
@@ -684,7 +695,7 @@ static void pair_publish(struct pair_encode *e, struct row_pair_plan *plan,
 		while (
 		    !live_pending_fits(&pending, bytes, sizeof pendingBytes)) {
 			discard_pending(pending.head, TIMING_REPLACED);
-			replaced++;
+			counters.replaced++;
 		}
 		live_payload_observe(&payloadControl, e->job_fps, overflow);
 		slot = live_pending_append(&pending, pendingBytes,
@@ -842,10 +853,10 @@ static void encoder(void *arg)
 		live_plan_consume(&consumed, stamp);
 		u32 snapshotUs = (u32)((svcGetSystemTick() - snapshot_begin) *
 				       1000000 / SYSCLOCK_ARM11);
-		snapshotCount++;
-		snapshotSumUs += snapshotUs;
-		if (snapshotUs > snapshotMaxUs)
-			snapshotMaxUs = snapshotUs;
+		counters.snapshot_count++;
+		counters.snapshot_sum_us += snapshotUs;
+		if (snapshotUs > counters.snapshot_max_us)
+			counters.snapshot_max_us = snapshotUs;
 		next = live_next_encode_tick(next, now, SYSCLOCK_ARM11, jobFps);
 		const u32 initialRate = jobRate;
 		u32 budget =
@@ -863,11 +874,13 @@ static void encoder(void *arg)
 		}
 		u32 targetBytes = budget * payloadControl.percent / 100;
 		for (unsigned i = 0; i < 2; i++) {
-			sourceReuse[i] += pairs && source[i] == lastSource[i];
-			lastSource[i] = source[i];
+			counters.source_reuse[i] +=
+			    counters.pairs &&
+			    source[i] == counters.last_source[i];
+			counters.last_source[i] = source[i];
 			jobUs[i] = 0;
 		}
-		pairs++;
+		counters.pairs++;
 		u32 seq = ++sequence;
 		unsigned q = targetQ ? targetQ : quality;
 		live_timing_begin(seq, stamp);
@@ -1146,7 +1159,7 @@ static void control_ack_rows(u32 flags, u32 sequence, u64 now)
 static void control_feedback(u32 sent, u32 transit, u64 now)
 {
 	peer_activity(now);
-	feedbackCount++;
+	counters.feedback_count++;
 	live_receiver_observe(&receiverFeedback, sent, transit, now,
 			      (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11);
 }
@@ -1204,17 +1217,17 @@ static void send_status_burst(u64 *due)
 	    .fps = fps,
 	    .encoded_top = live_encoded_frames(0),
 	    .encoded_bottom = live_encoded_frames(1),
-	    .sent_top = frames[0],
-	    .sent_bottom = frames[1],
-	    .send_errors = errors,
-	    .expired_pairs = expired,
-	    .feedback_count = feedbackCount,
+	    .sent_top = counters.frames[0],
+	    .sent_bottom = counters.frames[1],
+	    .send_errors = counters.errors,
+	    .expired_pairs = counters.expired,
+	    .feedback_count = counters.feedback_count,
 	    .encoder_core_top = encoderCores[0],
 	    .encoder_core_bottom = encoderCores[1],
 	    .last_encode_us_top =
-		__atomic_load_n(&lastEncodeUs[0], __ATOMIC_RELAXED),
+		__atomic_load_n(&counters.last_encode_us[0], __ATOMIC_RELAXED),
 	    .last_encode_us_bottom =
-		__atomic_load_n(&lastEncodeUs[1], __ATOMIC_RELAXED),
+		__atomic_load_n(&counters.last_encode_us[1], __ATOMIC_RELAXED),
 	    .audio_enabled = audioEnabled,
 	    .audio_blocks_queued =
 		__atomic_load_n(&audio.queue.queued, __ATOMIC_RELAXED),
@@ -1226,7 +1239,7 @@ static void send_status_burst(u64 *due)
 	};
 	uint32_t pacing_words[LIVE_PACING_WORDS];
 	LightLock_Lock(&lock);
-	uint32_t overwritten = replaced;
+	uint32_t overwritten = counters.replaced;
 	LightLock_Unlock(&lock);
 	live_packet_snapshot(&packetReport, pacing_words, session,
 			     status.duration_ms, pacingMode, started,
@@ -1250,7 +1263,7 @@ static void send_status_burst(u64 *due)
 	    .rows_enabled = rowBanks != NULL,
 	    .combined_fec = combinedFec,
 	    .audio_wire_bytes = audio.wire_bytes,
-	    .video_wire_bytes = videoWireBytes,
+	    .video_wire_bytes = counters.video_wire_bytes,
 	    .pacing_mode = pacingMode,
 	};
 	memcpy(aux.pacing_words, pacing_words, sizeof(aux.pacing_words));
@@ -1434,7 +1447,7 @@ static bool send_repair(u64 *total_due, u64 now, u64 next_fresh_due)
 					next_fresh_due, &io);
 
 	if (sent && repair_tx.last_wire)
-		videoWireBytes += repair_tx.last_wire;
+		counters.video_wire_bytes += repair_tx.last_wire;
 	return sent;
 }
 
@@ -1491,17 +1504,17 @@ static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
 	u64 returned = svcGetSystemTick();
 	u32 us = (u32)((returned - begin) * 1000000 / SYSCLOCK_ARM11);
 	live_timing_packet(begin, returned, sent == (int)(len + header));
-	sendCalls++;
-	sendSumUs += us;
-	if (us > sendMaxUs)
-		sendMaxUs = us;
+	counters.send_calls++;
+	counters.send_sum_us += us;
+	if (us > counters.send_max_us)
+		counters.send_max_us = us;
 	pacing_charge(&pacing->totalDue, begin, returned, len + header + 28,
 		      PACKET_VIDEO);
 	live_video_charge(&pacing->video, begin, len + header + 28,
 			  SYSCLOCK_ARM11);
 	if (sent != (int)(len + header)) {
 		lastErrno = errno;
-		errors++;
+		counters.errors++;
 		live_timing_finish(TIMING_SOCKET_ERROR);
 		return false;
 	}
@@ -1511,7 +1524,7 @@ static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
 		packetReport.flags |= 1;
 		pacing->firstPacket = false;
 	}
-	videoWireBytes += len + header + 28;
+	counters.video_wire_bytes += len + header + 28;
 	return true;
 }
 struct tx_frame {
@@ -1536,7 +1549,7 @@ static void sender_purge_pending(u64 now)
 		} else if (live_pending_expired(head, now, SYSCLOCK_ARM11,
 						fps)) {
 			discard_pending(pending.head, TIMING_TOO_OLD);
-			expired++;
+			counters.expired++;
 		} else {
 			break;
 		}
@@ -1635,7 +1648,7 @@ static bool sender_prepare(struct tx_frame *tx)
 			live_timing_claim(slot);
 		} else {
 			live_timing_drop_pending(slot, TIMING_REPLACED);
-			replaced++;
+			counters.replaced++;
 		}
 		sender_copy_panels(tx, pair, send_key);
 		live_pending_remove(&pending, slot);
@@ -1653,7 +1666,7 @@ static void sender_send_frame(struct tx_frame *tx, PacketPacing *pacing,
 	LiveRepairFrame *cached = tx->cached;
 	u8 **sending = tx->sending;
 	if (!cached) {
-		expired++;
+		counters.expired++;
 		live_timing_finish(TIMING_TOO_OLD);
 		return;
 	}
@@ -1683,7 +1696,7 @@ static void sender_send_frame(struct tx_frame *tx, PacketPacing *pacing,
 		begin, SYSCLOCK_ARM11, wire,
 		live_av_video_rate(rate, audioEnabled), qualityTarget != 0);
 	if (begin - queued > SYSCLOCK_ARM11 / fps * 2) {
-		expired++;
+		counters.expired++;
 		live_timing_finish(TIMING_TOO_OLD);
 		return;
 	}
@@ -1753,15 +1766,15 @@ static void sender_send_frame(struct tx_frame *tx, PacketPacing *pacing,
 	if (ok) {
 		if (!*sent_frame || *last_sent_seq != seq) {
 			if (sizes[0])
-				frames[0]++;
+				counters.frames[0]++;
 			if (sizes[1])
-				frames[1]++;
+				counters.frames[1]++;
 		}
 		*sent_frame = true;
 		*last_sent_seq = seq;
 		live_timing_finish(TIMING_SENT);
 	} else
-		expired++;
+		counters.expired++;
 }
 
 static void sender(void *unused)
@@ -1793,40 +1806,42 @@ static void stream_reset(void)
 	packetReport = (LivePacketReport){0};
 	__atomic_store_n(&capturePaused, false, __ATOMIC_RELEASE);
 	memset(rawValid, 0, sizeof rawValid);
-	memset(attempts, 0, sizeof attempts);
-	memset(jpegFrames, 0, sizeof jpegFrames);
-	memset(maxUs, 0, sizeof maxUs);
-	memset(maxBytes, 0, sizeof maxBytes);
-	memset(sumUs, 0, sizeof sumUs);
-	memset(convertCount, 0, sizeof convertCount);
-	memset(convertMaxUs, 0, sizeof convertMaxUs);
-	memset(convertSumUs, 0, sizeof convertSumUs);
-	memset(convertedMcus, 0, sizeof convertedMcus);
-	snapshotCount = snapshotMaxUs = 0;
-	snapshotSumUs = 0;
-	memset(changedMcus, 0, sizeof changedMcus);
-	memset(sourceReuse, 0, sizeof sourceReuse);
-	memset(lastSource, 0, sizeof lastSource);
-	memset(frames, 0, sizeof frames);
-	memset(lastEncodeUs, 0, sizeof lastEncodeUs);
-	sequence = replaced = errors = expired = oversize = retries = pairs =
-	    sendCalls = sendMaxUs = feedbackCount = 0;
-	configEpoch = configSequence = configChanges = ratePendingKept =
-	    rateEncodingKept = 0;
-	sendSumUs = 0;
+	memset(counters.attempts, 0, sizeof counters.attempts);
+	memset(counters.jpeg_frames, 0, sizeof counters.jpeg_frames);
+	memset(counters.max_us, 0, sizeof counters.max_us);
+	memset(counters.max_bytes, 0, sizeof counters.max_bytes);
+	memset(counters.sum_us, 0, sizeof counters.sum_us);
+	memset(counters.convert_count, 0, sizeof counters.convert_count);
+	memset(counters.convert_max_us, 0, sizeof counters.convert_max_us);
+	memset(counters.convert_sum_us, 0, sizeof counters.convert_sum_us);
+	memset(counters.converted_mcus, 0, sizeof counters.converted_mcus);
+	counters.snapshot_count = counters.snapshot_max_us = 0;
+	counters.snapshot_sum_us = 0;
+	memset(counters.changed_mcus, 0, sizeof counters.changed_mcus);
+	memset(counters.source_reuse, 0, sizeof counters.source_reuse);
+	memset(counters.last_source, 0, sizeof counters.last_source);
+	memset(counters.frames, 0, sizeof counters.frames);
+	memset(counters.last_encode_us, 0, sizeof counters.last_encode_us);
+	sequence = counters.replaced = counters.errors = counters.expired =
+	    counters.oversize = counters.retries = counters.pairs =
+		counters.send_calls = counters.send_max_us =
+		    counters.feedback_count = 0;
+	configEpoch = configSequence = counters.config_changes =
+	    counters.rate_pending_kept = counters.rate_encoding_kept = 0;
+	counters.send_sum_us = 0;
 	lastErrno = 0;
 	qualityTarget = 0;
 	quality = 60;
 	spare = 0;
 	screenMask = 3;
 	payloadControl = (LivePayloadControl){.percent = 100};
-	compactSavedBytes = 0;
-	compactFrames = compactFallbacks = 0;
+	counters.compact_saved_bytes = 0;
+	counters.compact_frames = counters.compact_fallbacks = 0;
 	rowsEnabled = false;
 	rowBase = rowCandidate = rowProbe = rowBanks = NULL;
 	live_r20_init(&r20);
 	rowKeys = rowRepeats = rowDeltas = rowAcks = rowSends = 0;
-	manualRenderFailures = manualWireDrops = 0;
+	counters.manual_render_failures = counters.manual_wire_drops = 0;
 	repairHistory = (LiveRepairHistory){0};
 	repairRequests = 0;
 	repair_tx = (struct live_repair_tx){0};
@@ -1835,7 +1850,7 @@ static void stream_reset(void)
 	probeAfter = 0;
 	rowLastKey = rowLastAck = rowBytesSaved = 0;
 	live_audio_sender_init(&audio);
-	videoWireBytes = 0;
+	counters.video_wire_bytes = 0;
 	session = (u32)started;
 	if (!session)
 		session = 1;
@@ -1933,29 +1948,29 @@ static void stream_write_stats(bool timing_saved)
 	size_t network_bytes;
 	struct live_stats stats = {
 	    .combined_fec = combinedFec,
-	    .sent_top = frames[0],
-	    .sent_bottom = frames[1],
-	    .replaced = replaced,
-	    .send_errors = errors,
+	    .sent_top = counters.frames[0],
+	    .sent_bottom = counters.frames[1],
+	    .replaced = counters.replaced,
+	    .send_errors = counters.errors,
 	    .rate = rate,
 	    .fps = fps,
 	    .duration_ms =
 		(svcGetSystemTick() - started) * 1000 / SYSCLOCK_ARM11,
-	    .expired_pairs = expired,
+	    .expired_pairs = counters.expired,
 	    .last_send_errno = lastErrno,
 	    .payload_target_percent = payloadControl.percent,
 	    .quality_target = qualityTarget,
 	    .pair_payload_budget =
 		pair_payload_budget(rate, fps, combinedFec, qualityTarget),
-	    .rate_pending_kept = ratePendingKept,
-	    .rate_encoding_kept = rateEncodingKept,
-	    .pairs_attempted = pairs,
-	    .pairs_oversize = oversize,
-	    .requantize_passes = retries,
+	    .rate_pending_kept = counters.rate_pending_kept,
+	    .rate_encoding_kept = counters.rate_encoding_kept,
+	    .pairs_attempted = counters.pairs,
+	    .pairs_oversize = counters.oversize,
+	    .requantize_passes = counters.retries,
 	    .quality = quality,
-	    .config_changes = configChanges,
-	    .manual_render_failures = manualRenderFailures,
-	    .manual_wire_budget_drops = manualWireDrops,
+	    .config_changes = counters.config_changes,
+	    .manual_render_failures = counters.manual_render_failures,
+	    .manual_wire_budget_drops = counters.manual_wire_drops,
 	    .repair_requests = repairRequests,
 	    .repair_packets = repair_tx.packets,
 	    .repair_wire_bytes = repair_tx.wire_bytes,
@@ -1965,18 +1980,18 @@ static void stream_write_stats(bool timing_saved)
 	    .repair_nack_invalid = repairHistory.invalid,
 	    .repair_fragments_expired = repairHistory.expired_fragments,
 	    .repair_fragments_evicted = repairHistory.evicted_fragments,
-	    .send_calls = sendCalls,
-	    .send_sum_us = sendSumUs,
-	    .send_max_us = sendMaxUs,
-	    .feedback_count = feedbackCount,
-	    .video_wire_bytes = videoWireBytes,
-	    .snapshot_count = snapshotCount,
-	    .snapshot_sum_us = snapshotSumUs,
-	    .snapshot_max_us = snapshotMaxUs,
+	    .send_calls = counters.send_calls,
+	    .send_sum_us = counters.send_sum_us,
+	    .send_max_us = counters.send_max_us,
+	    .feedback_count = counters.feedback_count,
+	    .video_wire_bytes = counters.video_wire_bytes,
+	    .snapshot_count = counters.snapshot_count,
+	    .snapshot_sum_us = counters.snapshot_sum_us,
+	    .snapshot_max_us = counters.snapshot_max_us,
 	    .compact_jpeg = compactJpeg,
-	    .compact_frames = compactFrames,
-	    .compact_saved_bytes = compactSavedBytes,
-	    .compact_fallbacks = compactFallbacks,
+	    .compact_frames = counters.compact_frames,
+	    .compact_saved_bytes = counters.compact_saved_bytes,
+	    .compact_fallbacks = counters.compact_fallbacks,
 	    .row_keys = rowKeys,
 	    .row_key_repeats = rowRepeats,
 	    .row_key_acks = rowAcks,
@@ -2001,18 +2016,18 @@ static void stream_write_stats(bool timing_saved)
 	};
 	for (unsigned i = 0; i < 2; i++) {
 		stats.screens[i] = (struct live_stats_screen){
-		    .attempts = attempts[i],
-		    .jpeg = jpegFrames[i],
-		    .encode_sum_us = sumUs[i],
-		    .encode_max_us = maxUs[i],
-		    .max_bytes = maxBytes[i],
+		    .attempts = counters.attempts[i],
+		    .jpeg = counters.jpeg_frames[i],
+		    .encode_sum_us = counters.sum_us[i],
+		    .encode_max_us = counters.max_us[i],
+		    .max_bytes = counters.max_bytes[i],
 		    .encoder_core = encoderCores[i],
-		    .changed_mcus = changedMcus[i],
-		    .source_reused = sourceReuse[i],
-		    .dma_converted = convertCount[i],
-		    .convert_sum_us = convertSumUs[i],
-		    .convert_max_us = convertMaxUs[i],
-		    .converted_mcus = convertedMcus[i],
+		    .changed_mcus = counters.changed_mcus[i],
+		    .source_reused = counters.source_reuse[i],
+		    .dma_converted = counters.convert_count[i],
+		    .convert_sum_us = counters.convert_sum_us[i],
+		    .convert_max_us = counters.convert_max_us[i],
+		    .converted_mcus = counters.converted_mcus[i],
 		};
 	}
 #ifdef LIVE_FRAME_TIMING
@@ -2098,13 +2113,13 @@ bool live_submit(int sc, const u8 *frame, u32 fmt, u32 stride, u32 pts,
 	LightLock_Unlock(&rawLocks[sc]);
 	if (converted < 0)
 		return false;
-	convertedMcus[sc] += (unsigned)converted;
+	counters.converted_mcus[sc] += (unsigned)converted;
 	LightEvent_Signal(&events[0]);
 	u32 us = (u32)((svcGetSystemTick() - begin) * 1000000 / SYSCLOCK_ARM11);
-	convertCount[sc]++;
-	convertSumUs[sc] += us;
-	if (us > convertMaxUs[sc])
-		convertMaxUs[sc] = us;
+	counters.convert_count[sc]++;
+	counters.convert_sum_us[sc] += us;
+	if (us > counters.convert_max_us[sc])
+		counters.convert_max_us[sc] = us;
 	return true;
 }
 void live_schedule(u32 stamp, u32 top, u32 bottom, u32 mask)
