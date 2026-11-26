@@ -1559,6 +1559,126 @@ static bool sender_prepare(struct tx_frame *tx)
 	return ready;
 }
 
+static void sender_send_frame(struct tx_frame *tx, PacketPacing *pacing,
+			      bool *sent_frame, u32 *last_sent_seq)
+{
+	u32 *sizes = tx->sizes;
+	u32 seq = tx->seq, stamp = tx->stamp, repeat = tx->repeat;
+	u64 queued = tx->queued;
+	LiveRepairFrame *cached = tx->cached;
+	u8 **sending = tx->sending;
+	if (!cached) {
+		expired++;
+		live_timing_finish(TIMING_TOO_OLD);
+		return;
+	}
+	u32 screenChunks[2] = {live_data_packets(sizes[0]),
+			       live_data_packets(sizes[1])};
+	const bool shared = combinedFec && sizes[0] && sizes[1];
+	u32 dataCount = shared ? live_data_packets(sizes[0] + sizes[1])
+			       : screenChunks[0] + screenChunks[1];
+	u32 wire =
+	    shared ? live_combined_wire(sizes[0] + sizes[1])
+		   : live_screen_wire(sizes[0]) + live_screen_wire(sizes[1]);
+	repair_tx.credit =
+	    shared ? live_repair_allowance(
+			 live_av_video_rate(rate, audioEnabled), fps, wire)
+		   : 0;
+	live_video_slot(&pacing->video, queued, wire, dataCount, fps,
+			live_av_video_rate(rate, audioEnabled));
+#ifdef LIVE_FRAME_TIMING
+	u32 parityCount =
+	    shared ? live_parity_packets(dataCount, LIVE_PAIR_PARITY)
+		   : live_parity_packets(screenChunks[0], LIVE_PARITY) +
+			 live_parity_packets(screenChunks[1], LIVE_PARITY);
+	live_timing_plan(dataCount, dataCount + parityCount);
+#endif
+	u64 begin = svcGetSystemTick(),
+	    deadline = live_video_deadline(
+		begin, SYSCLOCK_ARM11, wire,
+		live_av_video_rate(rate, audioEnabled), qualityTarget != 0);
+	if (begin - queued > SYSCLOCK_ARM11 / fps * 2) {
+		expired++;
+		live_timing_finish(TIMING_TOO_OLD);
+		return;
+	}
+	pacing->firstPacket = true;
+	u8 parity[LIVE_PAIR_PARITY][LIVE_CHUNK] = {0};
+	bool ok = true;
+	if (shared) {
+		u8 fragment[LIVE_CHUNK];
+		u32 count = dataCount;
+		/* Shift repeated keys by a third so the same
+		 * short Wi-Fi fade need not erase the same
+		 * offsets on each pass. */
+		u32 index = repeat * count / 3;
+		for (u32 step = 0; ok && step < count; step++) {
+			u32 len =
+			    live_pair_fragment(fragment, sending[0], sizes[0],
+					       sending[1], sizes[1], index);
+			u8 *stripe = parity[index % LIVE_PAIR_PARITY];
+			for (u32 j = 0; j < len; j++)
+				stripe[j] ^= fragment[j];
+			ok = send_packet(pacing, deadline, "R10P", seq, stamp,
+					 sizes[0], sizes[1], index, fragment,
+					 len);
+			if (++index == count)
+				index = 0;
+		}
+		for (unsigned order = 0; order < LIVE_PAIR_PARITY && ok;
+		     order++) {
+			unsigned stripe = (count + order) % LIVE_PAIR_PARITY;
+			if (stripe >= count)
+				return;
+			ok = send_packet(pacing, deadline, "R10F", seq, stamp,
+					 sizes[0], sizes[1], stripe,
+					 parity[stripe], LIVE_CHUNK);
+		}
+	} else {
+		for (u32 off = 0; ok && (off < sizes[0] || off < sizes[1]);
+		     off += LIVE_CHUNK)
+			for (unsigned sc = 0; sc < 2 && ok; sc++) {
+				if (off >= sizes[sc])
+					return;
+				u32 len = sizes[sc] - off > LIVE_CHUNK
+					      ? LIVE_CHUNK
+					      : sizes[sc] - off;
+				u8 *stripe =
+				    parity[sc * LIVE_PARITY +
+					   off / LIVE_CHUNK % LIVE_PARITY];
+				for (u32 j = 0; j < len; j++)
+					stripe[j] ^= sending[sc][off + j];
+				ok = send_packet(pacing, deadline, "R3P2", seq,
+						 stamp, sc, sizes[sc], off,
+						 sending[sc] + off, len);
+			}
+		for (unsigned stripe = 0; stripe < LIVE_PARITY && ok; stripe++)
+			for (unsigned sc = 0; sc < 2 && ok; sc++) {
+				if (stripe >= screenChunks[sc])
+					return;
+				ok = send_packet(
+				    pacing, deadline, "R3F2", seq, stamp, sc,
+				    sizes[sc], stripe,
+				    parity[sc * LIVE_PARITY + stripe],
+				    LIVE_CHUNK);
+			}
+	}
+	sendActiveTicks += svcGetSystemTick() - begin;
+	cached->complete = ok && shared;
+	if (ok) {
+		if (!*sent_frame || *last_sent_seq != seq) {
+			if (sizes[0])
+				frames[0]++;
+			if (sizes[1])
+				frames[1]++;
+		}
+		*sent_frame = true;
+		*last_sent_seq = seq;
+		live_timing_finish(TIMING_SENT);
+	} else
+		expired++;
+}
+
 static void sender(void *unused)
 {
 	(void)unused;
@@ -1569,7 +1689,7 @@ static void sender(void *unused)
 		control(&pacing.totalDue);
 		if (!net.media_ready || capture_paused()) {
 			svcSleepThread(10000000);
-			continue;
+			return;
 		}
 		send_audio(&pacing.totalDue);
 		struct tx_frame tx;
@@ -1578,132 +1698,9 @@ static void sender(void *unused)
 			if (!send_repair(&pacing.totalDue, svcGetSystemTick(),
 					 0))
 				svcSleepThread(500000);
-			continue;
+			return;
 		}
-		u32 *sizes = tx.sizes;
-		u32 seq = tx.seq, stamp = tx.stamp, repeat = tx.repeat;
-		u64 queued = tx.queued;
-		LiveRepairFrame *cached = tx.cached;
-		u8 **sending = tx.sending;
-		if (!cached) {
-			expired++;
-			live_timing_finish(TIMING_TOO_OLD);
-			continue;
-		}
-		u32 screenChunks[2] = {live_data_packets(sizes[0]),
-				       live_data_packets(sizes[1])};
-		const bool shared = combinedFec && sizes[0] && sizes[1];
-		u32 dataCount = shared ? live_data_packets(sizes[0] + sizes[1])
-				       : screenChunks[0] + screenChunks[1];
-		u32 wire = shared ? live_combined_wire(sizes[0] + sizes[1])
-				  : live_screen_wire(sizes[0]) +
-					live_screen_wire(sizes[1]);
-		repair_tx.credit =
-		    shared
-			? live_repair_allowance(
-			      live_av_video_rate(rate, audioEnabled), fps, wire)
-			: 0;
-		live_video_slot(&pacing.video, queued, wire, dataCount, fps,
-				live_av_video_rate(rate, audioEnabled));
-#ifdef LIVE_FRAME_TIMING
-		u32 parityCount =
-		    shared
-			? live_parity_packets(dataCount, LIVE_PAIR_PARITY)
-			: live_parity_packets(screenChunks[0], LIVE_PARITY) +
-			      live_parity_packets(screenChunks[1], LIVE_PARITY);
-		live_timing_plan(dataCount, dataCount + parityCount);
-#endif
-		u64 begin = svcGetSystemTick(),
-		    deadline = live_video_deadline(
-			begin, SYSCLOCK_ARM11, wire,
-			live_av_video_rate(rate, audioEnabled),
-			qualityTarget != 0);
-		if (begin - queued > SYSCLOCK_ARM11 / fps * 2) {
-			expired++;
-			live_timing_finish(TIMING_TOO_OLD);
-			continue;
-		}
-		pacing.firstPacket = true;
-		u8 parity[LIVE_PAIR_PARITY][LIVE_CHUNK] = {0};
-		bool ok = true;
-		if (shared) {
-			u8 fragment[LIVE_CHUNK];
-			u32 count = dataCount;
-			/* Shift repeated keys by a third so the same
-			 * short Wi-Fi fade need not erase the same
-			 * offsets on each pass. */
-			u32 index = repeat * count / 3;
-			for (u32 step = 0; ok && step < count; step++) {
-				u32 len = live_pair_fragment(
-				    fragment, sending[0], sizes[0], sending[1],
-				    sizes[1], index);
-				u8 *stripe = parity[index % LIVE_PAIR_PARITY];
-				for (u32 j = 0; j < len; j++)
-					stripe[j] ^= fragment[j];
-				ok = send_packet(&pacing, deadline, "R10P", seq,
-						 stamp, sizes[0], sizes[1],
-						 index, fragment, len);
-				if (++index == count)
-					index = 0;
-			}
-			for (unsigned order = 0; order < LIVE_PAIR_PARITY && ok;
-			     order++) {
-				unsigned stripe =
-				    (count + order) % LIVE_PAIR_PARITY;
-				if (stripe >= count)
-					continue;
-				ok = send_packet(&pacing, deadline, "R10F", seq,
-						 stamp, sizes[0], sizes[1],
-						 stripe, parity[stripe],
-						 LIVE_CHUNK);
-			}
-		} else {
-			for (u32 off = 0;
-			     ok && (off < sizes[0] || off < sizes[1]);
-			     off += LIVE_CHUNK)
-				for (unsigned sc = 0; sc < 2 && ok; sc++) {
-					if (off >= sizes[sc])
-						continue;
-					u32 len = sizes[sc] - off > LIVE_CHUNK
-						      ? LIVE_CHUNK
-						      : sizes[sc] - off;
-					u8 *stripe = parity[sc * LIVE_PARITY +
-							    off / LIVE_CHUNK %
-								LIVE_PARITY];
-					for (u32 j = 0; j < len; j++)
-						stripe[j] ^=
-						    sending[sc][off + j];
-					ok = send_packet(
-					    &pacing, deadline, "R3P2", seq,
-					    stamp, sc, sizes[sc], off,
-					    sending[sc] + off, len);
-				}
-			for (unsigned stripe = 0; stripe < LIVE_PARITY && ok;
-			     stripe++)
-				for (unsigned sc = 0; sc < 2 && ok; sc++) {
-					if (stripe >= screenChunks[sc])
-						continue;
-					ok = send_packet(
-					    &pacing, deadline, "R3F2", seq,
-					    stamp, sc, sizes[sc], stripe,
-					    parity[sc * LIVE_PARITY + stripe],
-					    LIVE_CHUNK);
-				}
-		}
-		sendActiveTicks += svcGetSystemTick() - begin;
-		cached->complete = ok && shared;
-		if (ok) {
-			if (!sentFrame || lastSentSeq != seq) {
-				if (sizes[0])
-					frames[0]++;
-				if (sizes[1])
-					frames[1]++;
-			}
-			sentFrame = true;
-			lastSentSeq = seq;
-			live_timing_finish(TIMING_SENT);
-		} else
-			expired++;
+		sender_send_frame(&tx, &pacing, &sentFrame, &lastSentSeq);
 	}
 }
 static void stream_reset(void)
