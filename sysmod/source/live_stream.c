@@ -1715,21 +1715,8 @@ static void sender(void *unused)
 			expired++;
 	}
 }
-Result live_start(void *(*allocate)(u32 bytes))
+static void stream_reset(void)
 {
-	if (!allocate || worker || encoders[0] || encoders[1])
-		return -1;
-	LightLock_Init(&lock);
-	for (unsigned i = 0; i < 2; i++)
-		LightLock_Init(&rawLocks[i]);
-	for (unsigned i = 0; i < 3; i++)
-		LightEvent_Init(&events[i], RESET_ONESHOT);
-	started = svcGetSystemTick();
-	stopping = false;
-	jobDone = 1;
-	pending = (LivePendingQueue){0};
-	planMask = 0;
-	pacingMode = 1;
 	packetReport = (LivePacketReport){0};
 	__atomic_store_n(&capturePaused, false, __ATOMIC_RELEASE);
 	memset(rawValid, 0, sizeof rawValid);
@@ -1788,6 +1775,10 @@ Result live_start(void *(*allocate)(u32 bytes))
 	live_net_report_init();
 	queue_network_report();
 	live_flush_network_report(true);
+}
+
+static int stream_open_resources(void *(*allocate)(u32 bytes))
+{
 	for (unsigned i = 0; i < 2; i++) {
 		live_jpeg_reset(i);
 		rawBytes[i] = live_jpeg_frame_size(i ? 320 : 400);
@@ -1842,6 +1833,25 @@ Result live_start(void *(*allocate)(u32 bytes))
 		return -5;
 	}
 	return 0;
+}
+
+Result live_start(void *(*allocate)(u32 bytes))
+{
+	if (!allocate || worker || encoders[0] || encoders[1])
+		return -1;
+	LightLock_Init(&lock);
+	for (unsigned i = 0; i < 2; i++)
+		LightLock_Init(&rawLocks[i]);
+	for (unsigned i = 0; i < 3; i++)
+		LightEvent_Init(&events[i], RESET_ONESHOT);
+	started = svcGetSystemTick();
+	stopping = false;
+	jobDone = 1;
+	pending = (LivePendingQueue){0};
+	planMask = 0;
+	pacingMode = 1;
+	stream_reset();
+	return stream_open_resources(allocate);
 }
 static void stream_write_stats(bool timing_saved)
 {
