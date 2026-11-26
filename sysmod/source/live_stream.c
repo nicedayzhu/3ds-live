@@ -1468,6 +1468,121 @@ static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
 	videoWireBytes += len + header + 28;
 	return true;
 }
+struct tx_frame {
+	u32 sizes[2];
+	u32 seq;
+	u32 stamp;
+	u32 repeat;
+	u64 queued;
+	bool send_key;
+	LiveRepairFrame *cached;
+	u8 *sending[2];
+};
+
+static bool sender_prepare(struct tx_frame *tx)
+{
+	bool ready;
+	u64 now;
+
+	memset(tx, 0, sizeof(*tx));
+	LightLock_Lock(&lock);
+	now = svcGetSystemTick();
+	while (pending.count) {
+		const LivePendingPair *head = &pending.slots[pending.head];
+
+		if (head->epoch != configEpoch ||
+		    (head->r20 && !r20_recent(now)))
+			discard_pending(pending.head, TIMING_RECONFIGURED);
+		else if (live_pending_expired(head, now, SYSCLOCK_ARM11, fps)) {
+			discard_pending(pending.head, TIMING_TOO_OLD);
+			expired++;
+		} else {
+			break;
+		}
+	}
+	ready = pending.count != 0;
+	if (ready) {
+		unsigned slot = pending.head;
+		const LivePendingPair *pair = &pending.slots[slot];
+		bool selective;
+		bool send_key;
+		u64 reserved, until;
+		static LiveRepairFrame single_frame;
+
+		tx->seq = pair->seq;
+		tx->stamp = pair->stamp;
+		tx->queued = pair->queued;
+		selective = repairPeerAt &&
+			    now - repairPeerAt <
+				(u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11;
+		send_key =
+		    rowCandidate &&
+		    (selective
+			 ? (rowSends == 0 && rowCandidate->seq == tx->seq)
+			 : rowSends < 3 && (u32)(tx->seq - rowCandidate->seq) <
+					       0x80000000u);
+		if (send_key &&
+		    (svcGetSystemTick() - rowLastKey > SYSCLOCK_ARM11 / 4 ||
+		     rowCandidate->length[0] + rowCandidate->length[1] >
+			 pair_payload_budget(rate, fps, combinedFec,
+					     qualityTarget))) {
+			send_key = false;
+			rowSends = 3;
+		}
+		if (send_key) {
+			tx->seq = rowCandidate->seq;
+			tx->stamp = rowCandidate->stamp;
+			tx->repeat = rowSends++;
+			if (tx->repeat)
+				rowRepeats++;
+		}
+		if (tx->seq == pair->seq)
+			live_timing_claim(slot);
+		else {
+			live_timing_drop_pending(slot, TIMING_REPLACED);
+			replaced++;
+		}
+		for (unsigned sc = 0; sc < 2; sc++)
+			tx->sizes[sc] = send_key ? rowCandidate->length[sc]
+						 : pair->length[sc];
+		reserved = svcGetSystemTick();
+		until = reserved +
+			(u64)SYSCLOCK_ARM11 * LIVE_REPAIR_HISTORY_MS / 1000;
+		if (tx->sizes[0] && tx->sizes[1]) {
+			tx->cached = live_repair_reserve(
+			    &repairHistory, sizeof sendArena, tx->sizes[0],
+			    tx->sizes[1], tx->seq, tx->stamp, fps, reserved,
+			    until);
+		} else {
+			/* A single-screen stream has no second panel, so it
+			 * cannot share the two-panel repair arena; send it
+			 * directly without repair. */
+			single_frame = (LiveRepairFrame){0};
+			single_frame.top = tx->sizes[0];
+			single_frame.bottom = tx->sizes[1];
+			tx->cached = &single_frame;
+		}
+		if (tx->cached) {
+			tx->sending[0] =
+			    sendArena + (tx->sizes[0] && tx->sizes[1]
+					     ? tx->cached->offset
+					     : 0);
+			tx->sending[1] = tx->sending[0] + tx->sizes[0];
+		}
+		for (unsigned sc = 0; tx->cached && sc < 2; sc++) {
+			const u8 *panel = pendingBytes + pair->offset +
+					  (sc ? pair->length[0] : 0);
+
+			memcpy(tx->sending[sc],
+			       send_key ? row_panel(rowCandidate, sc) : panel,
+			       tx->sizes[sc]);
+		}
+		live_pending_remove(&pending, slot);
+	}
+	LightLock_Unlock(&lock);
+	return ready;
+}
+
 static void sender(void *unused)
 {
 	(void)unused;
@@ -1481,116 +1596,19 @@ static void sender(void *unused)
 			continue;
 		}
 		send_audio(&pacing.totalDue);
-		u32 sizes[2] = {0, 0}, seq = 0, stamp = 0, repeat = 0;
-		u64 queued = 0;
-		bool ready;
-		LiveRepairFrame *cached = NULL;
-		u8 *sending[2] = {NULL, NULL};
-		LightLock_Lock(&lock);
-		u64 now = svcGetSystemTick();
-		while (pending.count) {
-			const LivePendingPair *head =
-			    &pending.slots[pending.head];
-			if (head->epoch != configEpoch ||
-			    (head->r20 && !r20_recent(now)))
-				discard_pending(pending.head,
-						TIMING_RECONFIGURED);
-			else if (live_pending_expired(head, now, SYSCLOCK_ARM11,
-						      fps)) {
-				discard_pending(pending.head, TIMING_TOO_OLD);
-				expired++;
-			} else
-				break;
-		}
-		ready = pending.count != 0;
-		if (ready) {
-			unsigned slot = pending.head;
-			const LivePendingPair *pair = &pending.slots[slot];
-			seq = pair->seq;
-			stamp = pair->stamp;
-			queued = pair->queued;
-			/* Selective repair protects the original key
-			 * without sacrificing a new capture slot.
-			 * Legacy receivers still get adjacent copies.
-			 */
-			bool selective =
-			    repairPeerAt &&
-			    now - repairPeerAt <
-				(u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11;
-			bool sendKey =
-			    rowCandidate &&
-			    (selective
-				 ? (rowSends == 0 && rowCandidate->seq == seq)
-				 : rowSends < 3 &&
-				       (u32)(seq - rowCandidate->seq) <
-					   0x80000000u);
-			if (sendKey &&
-			    (svcGetSystemTick() - rowLastKey >
-				 SYSCLOCK_ARM11 / 4 ||
-			     rowCandidate->length[0] + rowCandidate->length[1] >
-				 pair_payload_budget(rate, fps, combinedFec,
-						     qualityTarget))) {
-				sendKey = false;
-				rowSends = 3;
-			}
-			if (sendKey) {
-				seq = rowCandidate->seq;
-				stamp = rowCandidate->stamp;
-				repeat = rowSends++;
-				if (repeat)
-					rowRepeats++;
-			}
-			if (seq == pair->seq)
-				live_timing_claim(slot);
-			else {
-				live_timing_drop_pending(slot, TIMING_REPLACED);
-				replaced++;
-			}
-			for (unsigned sc = 0; sc < 2; sc++)
-				sizes[sc] = sendKey ? rowCandidate->length[sc]
-						    : pair->length[sc];
-			u64 reserved = svcGetSystemTick();
-			u64 until = reserved + (u64)SYSCLOCK_ARM11 *
-						   LIVE_REPAIR_HISTORY_MS /
-						   1000;
-			static LiveRepairFrame singleFrame;
-			if (sizes[0] && sizes[1]) {
-				cached = live_repair_reserve(
-				    &repairHistory, sizeof sendArena, sizes[0],
-				    sizes[1], seq, stamp, fps, reserved, until);
-			} else {
-				/* A single-screen stream has no second
-				 * panel, so it cannot share the
-				 * two-panel repair arena; send it
-				 * directly without repair. */
-				singleFrame = (LiveRepairFrame){0};
-				singleFrame.top = sizes[0];
-				singleFrame.bottom = sizes[1];
-				cached = &singleFrame;
-			}
-			if (cached) {
-				sending[0] =
-				    sendArena +
-				    (sizes[0] && sizes[1] ? cached->offset : 0);
-				sending[1] = sending[0] + sizes[0];
-			}
-			for (unsigned sc = 0; cached && sc < 2; sc++) {
-				const u8 *panel = pendingBytes + pair->offset +
-						  (sc ? pair->length[0] : 0);
-				memcpy(sending[sc],
-				       sendKey ? row_panel(rowCandidate, sc)
-					       : panel,
-				       sizes[sc]);
-			}
-			live_pending_remove(&pending, slot);
-		}
-		LightLock_Unlock(&lock);
-		if (!ready) {
+		struct tx_frame tx;
+
+		if (!sender_prepare(&tx)) {
 			if (!send_repair(&pacing.totalDue, svcGetSystemTick(),
 					 0))
 				svcSleepThread(500000);
 			continue;
 		}
+		u32 *sizes = tx.sizes;
+		u32 seq = tx.seq, stamp = tx.stamp, repeat = tx.repeat;
+		u64 queued = tx.queued;
+		LiveRepairFrame *cached = tx.cached;
+		u8 **sending = tx.sending;
 		if (!cached) {
 			expired++;
 			live_timing_finish(TIMING_TOO_OLD);
