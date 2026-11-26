@@ -79,3 +79,23 @@ cd android && ./gradlew testDebugUnitTest
 
 尚未完成：掌机实机回归、`live_encoder` / `live_sender` 文件级拆分、
 `struct live_stream` 状态收敛。
+
+## 最终交付状态
+
+2026-11-26 的最终验证（`scripts/verify-all.ps1`）：
+
+- 3DS 交叉编译通过；
+- kernel style 75 个文件通过；
+- native tests 23/23 通过；
+- PC 客户端构建通过；
+- Android analyze + unit test 通过。
+
+本次**没有**把 `live_stream.c` 完全拆空，也没有做掌机实机回归。以下仍是后续工作：
+
+1. `live_encoder.c` / `live_sender.c` 文件级拆分；
+2. 把 pending、repair arena、row anchor、编码工作区收敛到 `struct live_stream`；
+3. 掌机实机验证视频、音频、repair 压力和长时间运行；
+4. 针对实机结果的性能回归（当前只有编译与主机协议测试）。
+
+因此这次重构应视为“风格基线 + 外围模块化 + 核心函数拆分”的交付，
+而不是整个 3DS 端代码的最终形态。
