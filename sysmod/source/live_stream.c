@@ -1211,6 +1211,93 @@ static void send_status_burst(u64 *due)
 #endif
 }
 
+static void control_receive(u64 *due)
+{
+	u64 now = svcGetSystemTick();
+
+	if (!(deferredControl.size ||
+	      now - lastControlTick >= SYSCLOCK_ARM11 / 100 ||
+	      now - net.last_probe_tick >= SYSCLOCK_ARM11))
+		return;
+	lastControlTick = now;
+	for (unsigned i = 0; i < 16; i++) {
+		u8 msg[64];
+		struct sockaddr_in from;
+		socklen_t size = sizeof from;
+		int n;
+		if (deferredControl.size) {
+			n = deferredControl.size;
+			from = deferredControl.from;
+			memcpy(msg, deferredControl.bytes, n);
+			deferredControl.size = 0;
+		} else
+			n = recvfrom(net.fd, msg, sizeof msg, 0,
+				     (struct sockaddr *)&from, &size);
+		if (n < 0) {
+			if (errno != EAGAIN && errno != EWOULDBLOCK)
+				net.diag.receive_errno = errno;
+			break;
+		}
+		now = svcGetSystemTick();
+		net.diag.replies++;
+		if (size < sizeof from || from.sin_family != AF_INET ||
+		    from.sin_port != net.target.sin_port)
+			continue;
+		if (net.automatic_host && !net.discovery.peer &&
+		    live_discover_invitation(msg, (size_t)n)) {
+			u32 address = ntohl(from.sin_addr.s_addr);
+			if (!live_reply_address(address, net.local_address,
+						net.local_mask) ||
+			    address == net.diag.reported_broadcast)
+				continue;
+			net.diag.hints++;
+			if (net.diag.last_hint_tick &&
+			    now - net.diag.last_hint_tick < SYSCLOCK_ARM11 / 5)
+				continue;
+			net.diag.last_hint_tick = now;
+			u8 probe[LIVE_DISCOVERY_BYTES];
+			live_discover_invited_probe(&net.discovery, session,
+						    probe);
+			if (live_net_send_probe(&net, probe, address, due,
+						&net_ops))
+				net.diag.hints_answered++;
+			continue;
+		}
+		if (n < 8 || get32(msg + 4) != session)
+			continue;
+		if (net.automatic_host && n >= 4 && !memcmp(msg, "3DLA", 4)) {
+			bool first = !net.discovery.peer;
+			u32 address = ntohl(from.sin_addr.s_addr);
+			if (live_reply_address(address, net.local_address,
+					       net.local_mask) &&
+			    address != net.diag.reported_broadcast &&
+			    live_discover_ack(&net.discovery, address, session,
+					      msg, (size_t)n, now)) {
+				net.diag.accepted++;
+				net.last_peer_control = now;
+				if (first) {
+					net.target.sin_addr = from.sin_addr;
+					lastStatusTick = 0;
+					__atomic_store_n(&net.media_ready, true,
+							 __ATOMIC_RELEASE);
+					queue_network_report();
+				}
+			}
+			continue;
+		}
+		if (!net.media_ready ||
+		    from.sin_addr.s_addr != net.target.sin_addr.s_addr)
+			continue;
+		live_control_handle(msg, n, now, screenMask, combinedFec,
+				    qualityTarget, &control_ops);
+	}
+	const bool hasVideo =
+	    live_receiver_recent(&receiverFeedback, now,
+				 (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11);
+	if (hasVideo != __atomic_load_n(&receiverVideo, __ATOMIC_RELAXED))
+		__atomic_store_n(&receiverVideo, hasVideo, __ATOMIC_RELEASE);
+}
+
 static void control(u64 *due)
 {
 	u64 now = svcGetSystemTick();
@@ -1225,97 +1312,7 @@ static void control(u64 *due)
 		row_peer(false, false);
 		LightLock_Unlock(&lock);
 	}
-	if (deferredControl.size ||
-	    now - lastControlTick >= SYSCLOCK_ARM11 / 100 ||
-	    now - net.last_probe_tick >= SYSCLOCK_ARM11) {
-		lastControlTick = now;
-		for (unsigned i = 0; i < 16; i++) {
-			u8 msg[64];
-			struct sockaddr_in from;
-			socklen_t size = sizeof from;
-			int n;
-			if (deferredControl.size) {
-				n = deferredControl.size;
-				from = deferredControl.from;
-				memcpy(msg, deferredControl.bytes, n);
-				deferredControl.size = 0;
-			} else
-				n = recvfrom(net.fd, msg, sizeof msg, 0,
-					     (struct sockaddr *)&from, &size);
-			if (n < 0) {
-				if (errno != EAGAIN && errno != EWOULDBLOCK)
-					net.diag.receive_errno = errno;
-				break;
-			}
-			now = svcGetSystemTick();
-			net.diag.replies++;
-			if (size < sizeof from || from.sin_family != AF_INET ||
-			    from.sin_port != net.target.sin_port)
-				continue;
-			if (net.automatic_host && !net.discovery.peer &&
-			    live_discover_invitation(msg, (size_t)n)) {
-				u32 address = ntohl(from.sin_addr.s_addr);
-				if (!live_reply_address(address,
-							net.local_address,
-							net.local_mask) ||
-				    address == net.diag.reported_broadcast)
-					continue;
-				net.diag.hints++;
-				if (net.diag.last_hint_tick &&
-				    now - net.diag.last_hint_tick <
-					SYSCLOCK_ARM11 / 5)
-					continue;
-				net.diag.last_hint_tick = now;
-				u8 probe[LIVE_DISCOVERY_BYTES];
-				live_discover_invited_probe(&net.discovery,
-							    session, probe);
-				if (live_net_send_probe(&net, probe, address,
-							due, &net_ops))
-					net.diag.hints_answered++;
-				continue;
-			}
-			if (n < 8 || get32(msg + 4) != session)
-				continue;
-			if (net.automatic_host && n >= 4 &&
-			    !memcmp(msg, "3DLA", 4)) {
-				bool first = !net.discovery.peer;
-				u32 address = ntohl(from.sin_addr.s_addr);
-				if (live_reply_address(address,
-						       net.local_address,
-						       net.local_mask) &&
-				    address != net.diag.reported_broadcast &&
-				    live_discover_ack(&net.discovery, address,
-						      session, msg, (size_t)n,
-						      now)) {
-					net.diag.accepted++;
-					net.last_peer_control = now;
-					if (first) {
-						net.target.sin_addr =
-						    from.sin_addr;
-						lastStatusTick = 0;
-						__atomic_store_n(
-						    &net.media_ready, true,
-						    __ATOMIC_RELEASE);
-						queue_network_report();
-					}
-				}
-				continue;
-			}
-			if (!net.media_ready ||
-			    from.sin_addr.s_addr != net.target.sin_addr.s_addr)
-				continue;
-			live_control_handle(msg, n, now, screenMask,
-					    combinedFec, qualityTarget,
-					    &control_ops);
-		}
-		const bool hasVideo = live_receiver_recent(
-		    &receiverFeedback, now,
-		    (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11);
-		if (hasVideo !=
-		    __atomic_load_n(&receiverVideo, __ATOMIC_RELAXED))
-			__atomic_store_n(&receiverVideo, hasVideo,
-					 __ATOMIC_RELEASE);
-	}
+	control_receive(due);
 	/* Consume queued acknowledgements before expiring the lease, rotating
 	 * the challenge or closing the only socket that can receive them. */
 	live_net_poll(&net, session, svcGetSystemTick(), due, &net_ops);
