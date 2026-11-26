@@ -1,6 +1,7 @@
 #include "live_stream.h"
 #include "live_config.h"
 #include "live_net_report.h"
+#include "live_audio_sender.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -137,12 +138,7 @@ static unsigned rowSends;
 static u64 rowLastKey, rowLastAck, rowBytesSaved;
 static u32 rowKeys, rowRepeats, rowDeltas, rowAcks;
 static u32 manualRenderFailures, manualWireDrops;
-static LiveAudioQueue audioQueue;
-static LiveAudioState audioCodec;
-static LiveAudioHistory audioHistory;
-static u64 audioEncodeSumUs, audioWireBytes;
-static u32 audioPacketSequence, audioPacketsSent, audioSendErrors,
-    audioEncodedBlocks, audioEncodeMaxUs;
+static struct live_audio_sender audio;
 static u32 get32(const u8 *p)
 {
 	return (u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24;
@@ -151,11 +147,6 @@ static void put32(u8 *p, u32 n)
 {
 	for (unsigned i = 0; i < 4; i++)
 		p[i] = (u8)(n >> (8 * i));
-}
-static void put16(u8 *p, u16 n)
-{
-	p[0] = (u8)n;
-	p[1] = (u8)(n >> 8);
 }
 static bool stopped(void)
 {
@@ -247,7 +238,7 @@ bool live_audio_submit(const s16 *pcm, u32 pts)
 {
 	if (!pcm || !live_audio_active() || !live_peer_ready())
 		return false;
-	return live_audio_queue_push(&audioQueue, pcm, pts, svcGetSystemTick());
+	return live_audio_sender_push(&audio, pcm, pts, svcGetSystemTick());
 }
 static void encode_job(unsigned sc, unsigned kind, unsigned q)
 {
@@ -906,84 +897,19 @@ static void pacing_charge(u64 *due, u64 begin, u64 returned, u32 wire,
 /* Only the network thread calls this. Audio is serviced between video
  * datagrams, not after a whole 150 ms video send. Previous-batch redundancy
  * repairs one lost audio datagram without a retransmission round trip. */
+static void audio_pacing_charge(u64 *due, u64 begin, u64 returned, u32 wire,
+				int kind)
+{
+	pacing_charge(due, begin, returned, wire, (enum LivePacketKind)kind);
+}
+
 static void send_audio(u64 *due)
 {
-	if (!audioEnabled || stopped())
-		return;
-	u64 now = svcGetSystemTick(), oldest;
-	if (!live_audio_queue_peek_tick(&audioQueue, &oldest))
-		return;
-	if (live_audio_queue_depth(&audioQueue) < LIVE_AUDIO_BATCH_BLOCKS &&
-	    (now < oldest || now - oldest < (u64)SYSCLOCK_ARM11 *
-						LIVE_AUDIO_BATCH_WAIT_US /
-						1000000ull))
-		return;
-	u8 packet[LIVE_AUDIO_MAX_PACKET_BYTES],
-	    fresh[LIVE_AUDIO_BATCH_BLOCKS * LIVE_AUDIO_RECORD_BYTES];
-	LiveAudioCapture item;
-	unsigned count = 0;
-	u64 firstCapture = 0;
-	while (count < LIVE_AUDIO_BATCH_BLOCKS &&
-	       live_audio_queue_pop(&audioQueue, &item, svcGetSystemTick(),
-				    (u64)SYSCLOCK_ARM11 *
-					LIVE_AUDIO_MAX_AGE_US / 1000000ull)) {
-		u8 *record = fresh + count * LIVE_AUDIO_RECORD_BYTES;
-		put32(record, item.sequence);
-		put32(record + 4, item.pts_us);
-		const u64 begin = svcGetSystemTick();
-		const size_t bytes =
-		    live_audio_encode(&audioCodec, item.pcm, LIVE_AUDIO_SAMPLES,
-				      record + 8, LIVE_AUDIO_BLOCK_BYTES);
-		const u32 us = (u32)((svcGetSystemTick() - begin) * 1000000 /
-				     SYSCLOCK_ARM11);
-		audioEncodeSumUs += us;
-		if (us > audioEncodeMaxUs)
-			audioEncodeMaxUs = us;
-		if (bytes != LIVE_AUDIO_BLOCK_BYTES)
-			continue;
-		if (!count)
-			firstCapture = item.queued_tick;
-		audioEncodedBlocks++;
-		count++;
-	}
-	if (!count)
-		return;
-	const LiveAudioBatch *repeat = live_audio_history_repeat(
-	    &audioHistory, svcGetSystemTick(),
-	    (u64)SYSCLOCK_ARM11 * LIVE_AUDIO_MAX_AGE_US / 1000000ull);
-	unsigned repeatCount = repeat ? repeat->count : 0;
-	memcpy(packet, "R9A1", 4);
-	put32(packet + 4, session);
-	put32(packet + 8, ++audioPacketSequence);
-	put16(packet + 12, (u16)(count + repeatCount));
-	put16(packet + 14, 0);
-	put32(packet + 16, LIVE_AUDIO_RATE_MHZ);
-	put16(packet + 20, LIVE_AUDIO_SAMPLES);
-	put16(packet + 22, LIVE_AUDIO_CHANNELS);
-	if (repeat)
-		memcpy(packet + LIVE_AUDIO_HEADER_BYTES, repeat->records,
-		       repeatCount * LIVE_AUDIO_RECORD_BYTES);
-	memcpy(packet + LIVE_AUDIO_HEADER_BYTES +
-		   repeatCount * LIVE_AUDIO_RECORD_BYTES,
-	       fresh, count * LIVE_AUDIO_RECORD_BYTES);
-	const u32 bytes = LIVE_AUDIO_HEADER_BYTES +
-			  (count + repeatCount) * LIVE_AUDIO_RECORD_BYTES;
-	pacing_sleep_until(*due);
-	if (stopped())
-		return;
-	const u64 begin = svcGetSystemTick();
-	const int sent = sendto(fd, packet, bytes, 0,
-				(struct sockaddr *)&target, sizeof target);
-	pacing_charge(due, begin, svcGetSystemTick(), bytes + 28, PACKET_AUDIO);
-	if (sent == (int)bytes) {
-		audioPacketsSent++;
-		audioWireBytes += bytes + 28;
-	} else
-		audioSendErrors++;
-	/* A failed first send can still recover in its later redundancy slot.
-	 */
-	live_audio_history_store(&audioHistory, fresh, count, firstCapture);
+	live_audio_sender_send(&audio, session, audioEnabled, stopped(), fd,
+			       &target, due, pacing_sleep_until,
+			       audio_pacing_charge);
 }
+
 static void network_report_snapshot(struct live_net_report *snapshot)
 {
 	memset(snapshot, 0, sizeof(*snapshot));
@@ -1116,7 +1042,6 @@ static void reset_peer_config(void)
 {
 	pacingMode = 1;
 	packetReport.flags = 0;
-	live_audio_history_reset(&audioHistory);
 	live_repair_clear(&repairHistory);
 	repairInterest = repairPeerAt = repairCredit = 0;
 	deferredControl.size = 0;
@@ -1560,11 +1485,11 @@ static void control(u64 *due)
 	    LIVE_AUDIO_RATE_MHZ,
 	    LIVE_AUDIO_CHANNELS,
 	    LIVE_AUDIO_SAMPLES,
-	    __atomic_load_n(&audioQueue.queued, __ATOMIC_RELAXED),
-	    __atomic_load_n(&audioQueue.dropped, __ATOMIC_RELAXED) +
-		__atomic_load_n(&audioQueue.expired, __ATOMIC_RELAXED),
-	    audioPacketsSent,
-	    live_audio_queue_depth(&audioQueue)};
+	    __atomic_load_n(&audio.queue.queued, __ATOMIC_RELAXED),
+	    __atomic_load_n(&audio.queue.dropped, __ATOMIC_RELAXED) +
+		__atomic_load_n(&audio.queue.expired, __ATOMIC_RELAXED),
+	    audio.packets_sent,
+	    live_audio_queue_depth(&audio.queue)};
 	for (unsigned i = 0; i < (msgBytes - 4) / 4; i++)
 		put32(msg + 4 + 4 * i, values[i]);
 	uint32_t pacingWords[LIVE_PACING_WORDS];
@@ -1588,7 +1513,7 @@ static void control(u64 *due)
 	memcpy(msg, "R17T", 4);
 	put32(msg + 4, session);
 	put32(msg + 8, values[1]);
-	put32(msg + 12, (u32)(audioWireBytes + videoWireBytes));
+	put32(msg + 12, (u32)(audio.wire_bytes + videoWireBytes));
 	put32(msg + 16, (u32)videoWireBytes);
 	send_status(due, msg, 20);
 	if (rowBanks && compactJpeg) {
@@ -1619,8 +1544,8 @@ static void control(u64 *due)
 	    repairRequests,
 	    repairPackets,
 	    repairWireBytes,
-	    audioQueue.dropped,
-	    audioQueue.expired,
+	    audio.queue.dropped,
+	    audio.queue.expired,
 	    (u32)(sendActiveTicks / SYSCLOCK_ARM11 * 1000000ull +
 		  (sendActiveTicks % SYSCLOCK_ARM11) * 1000000ull /
 		      SYSCLOCK_ARM11)};
@@ -2089,12 +2014,7 @@ Result live_start(void *(*allocate)(u32 bytes))
 	lastRepairPoll = repairInterest = repairPeerAt = sendActiveTicks = 0;
 	probeAfter = 0;
 	rowLastKey = rowLastAck = rowBytesSaved = 0;
-	live_audio_queue_init(&audioQueue);
-	live_audio_init(&audioCodec);
-	live_audio_history_reset(&audioHistory);
-	audioPacketSequence = audioPacketsSent = audioSendErrors =
-	    audioEncodedBlocks = audioEncodeMaxUs = 0;
-	audioEncodeSumUs = audioWireBytes = 0;
+	live_audio_sender_init(&audio);
 	videoWireBytes = 0;
 	session = (u32)started;
 	if (!session)
@@ -2288,11 +2208,13 @@ void live_stop(void)
 		"mean_us=%llu\naudio_encode_max_us=%lu\n"
 		"audio_reserved_bytes_per_second=%lu\n",
 		audioEnabled ? 1u : 0u, LIVE_AUDIO_RATE_MHZ, LIVE_AUDIO_SAMPLES,
-		audioQueue.queued, audioQueue.dropped, audioQueue.expired,
-		audioPacketsSent, audioSendErrors, audioWireBytes,
-		audioEncodedBlocks,
-		audioEncodedBlocks ? audioEncodeSumUs / audioEncodedBlocks : 0,
-		audioEncodeMaxUs,
+		audio.queue.queued, audio.queue.dropped, audio.queue.expired,
+		audio.packets_sent, audio.send_errors, audio.wire_bytes,
+		audio.encoded_blocks,
+		audio.encoded_blocks
+		    ? audio.encode_sum_us / audio.encoded_blocks
+		    : 0,
+		audio.encode_max_us,
 		audioEnabled ? (u32)LIVE_AUDIO_RESERVE_BYTES : 0u);
 	for (unsigned i = 0; i < 2; i++)
 		fprintf(
