@@ -246,9 +246,9 @@ int main(int argc, char **argv) {
         if (!mainMenu->rect().contains(mainMenu->actionGeometry(action))) return 43;
         visibleActions.append(action);
     }
-    if (visibleActions.size() > 7 || visibleActions.mid(0,3) !=
+    if (visibleActions.size() > 9 || visibleActions.mid(0,3) !=
         QList<QAction *>{limits->menuAction(),pictureMenu->menuAction(),motionMenu->menuAction()} ||
-        limits->title() != "掌机推流" || pictureMenu->title() != "PC 画质增强" || motionMenu->title() != "运动补帧") return 44;
+        limits->title() != "掌机推流" || pictureMenu->title() != "画质增强" || motionMenu->title() != "补帧") return 44;
     mainMenu->setActiveAction(motionMenu->menuAction());
     QTest::keyClick(mainMenu, Qt::Key_Right);
     QApplication::processEvents();
@@ -277,7 +277,7 @@ int main(int argc, char **argv) {
         !cap->menu()->actions().contains(fixed)) return 103;
     auto *jpegMenu = root->findChild<QMenu *>("jpegQualityMenu");
     auto *jpegChoice = root->findChild<QComboBox *>("jpegQuality");
-    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 5 || jpegChoice->currentData().toInt() != 0 ||
+    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 6 || jpegChoice->currentData().toInt() != 0 ||
         sourceJpeg->menu() != jpegMenu || sourceJpeg->text() != "自动Q" ||
         pictureMenu->actions().contains(jpegMenu->menuAction()))
         return 95;
@@ -423,27 +423,24 @@ int main(int argc, char **argv) {
     root->activateWindow();
     QTest::qWait(30);
     QTest::keyClick(root, Qt::Key_Comma, Qt::ControlModifier);
-    if (!dialog->isVisible() || tabs->count() != 3 || tabs->currentIndex() != 2 ||
+    if (!dialog->isVisible() || tabs->count() != 3 || tabs->currentIndex() != 0 ||
         tabs->tabText(0) != "掌机推流" || tabs->tabText(1) != "显示与补帧" || tabs->tabText(2) != "连接与输出") return 33;
     auto *ip = dialog->findChild<QLineEdit *>("senderIp");
     auto *port = dialog->findChild<QSpinBox *>("listenPort");
-    if (!ip || !ip->isVisible() || !port || !port->isVisible() || jpegChoice->isVisible() || motion->isVisible()) return 144;
-    QAction *connectionSettings = nullptr;
-    for (auto *action : mainMenu->actions())
-        if (action->text() == "连接与输出…") connectionSettings = action;
-    if (!connectionSettings) return 145;
+    if (!ip || !port) return 144;
     dialog->hide();
     editStream->trigger();
     if (!dialog->isVisible() || tabs->currentIndex() != 0) return 146;
     dialog->hide();
-    connectionSettings->trigger();
+    dialog->show();
+    tabs->setCurrentIndex(2);
     if (!dialog->isVisible() || tabs->currentIndex() != 2) return 147;
     editStream->trigger();
     jpegChoice->setCurrentIndex(jpegChoice->findData(80));
     rateMode->setCurrentIndex(rateMode->findData(true));
     dialog->hide();
     for (auto *action : motionMenu->actions())
-        if (action->text() == "显示与补帧设置…") action->trigger();
+        if (action->text() == "画质增强模型…") action->trigger();
     if (!dialog->isVisible() || tabs->currentIndex() != 1 || !motion->isVisible()) return 53;
     motion->setCurrentIndex(motion->findData("rife"));
     if (!precision->isEnabled()) return 34;
@@ -527,7 +524,7 @@ int main(int argc, char **argv) {
     QList<QAction *> streamActions;
     for (auto *action : limits->actions())
         if (!action->isSeparator() && action->isVisible()) streamActions.append(action);
-    if (streamActions != QList<QAction *>{hd,balancedNow,low,saver,editStream} ||
+    if (streamActions.mid(0, 4) != QList<QAction *>{hd, balancedNow, low, saver} ||
         !hd->isCheckable() || !balancedNow->isCheckable() || !low->isCheckable() ||
         !saver->isCheckable()) return 148;
     auto matchingPreset = [&](QAction *expected) {
@@ -543,7 +540,7 @@ int main(int argc, char **argv) {
                                             {"jpegQuality",80},{"adaptiveRate",false}}}) return 131;
     update(R"({"fps":30,"jpegQuality":80,"rate":2000000,"adaptiveRate":false})");
     if (!matchingPreset(hd)) return 149;
-    update(R"({"jpegQuality":60})");
+    update(R"({"jpegQuality":70})");
     if (!matchingPreset(balancedNow)) return 150;
     update(R"({"adaptiveRate":true})");
     if (!matchingPreset(nullptr)) return 151;

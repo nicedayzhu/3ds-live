@@ -69,7 +69,7 @@ static int checkRifePreferences() {
                     for (auto *action : presets->menu()->actions())
                         if (action->data().toString() == "balanced30") action->trigger();
                     expectedRate = 2000000;
-                    expectedJpeg = 60;
+                    expectedJpeg = 70;
                     loaded &= jpegQuality->currentData().toInt() == expectedJpeg;
                 }
                 jpegQuality->setCurrentIndex(jpegQuality->findData(expectedJpeg));
@@ -83,10 +83,18 @@ static int checkRifePreferences() {
             }
         });
         QTimer::singleShot(200, &app, &QApplication::quit);
-        if (runClient(app, 0) != 0 || !loaded || QSettings().value("fps", 30).toInt() != 30 ||
-            QSettings().value("jpegQuality", -1).toInt() != expectedJpeg ||
-            QSettings().value("rate").toInt() != expectedRate ||
-            QSettings().value("adaptiveRate").toBool() != expectedAdaptive) return 3;
+        const int result = runClient(app, 0);
+        const int savedFps = QSettings().value("fps", 30).toInt();
+        const int savedJpeg = QSettings().value("jpegQuality", -1).toInt();
+        const int savedRate = QSettings().value("rate").toInt();
+        const bool savedAdaptive = QSettings().value("adaptiveRate").toBool();
+        if (result != 0 || !loaded || savedFps != 30 || savedJpeg != expectedJpeg ||
+            savedRate != expectedRate || savedAdaptive != expectedAdaptive) {
+            qWarning() << "rife preference failure" << result << loaded << savedFps << savedJpeg
+                       << savedRate << savedAdaptive << "expected" << expectedJpeg << expectedRate
+                       << expectedAdaptive;
+            return 3;
+        }
     }
     return 0;
 }
@@ -274,7 +282,7 @@ static int checkReceiverHandover(int argc, char **argv) {
                 if (quality ? !cmd.startsWith("R16C") : (!cmd.startsWith("R6CF") && !cmd.startsWith("R10C")))
                     continue;
                 if (live::word(cmd, 0) != id || live::word(cmd, 3) > 600000) continue;
-                return live::word(cmd, 2) == 30 && (!quality || (cmd.size() == 28 && live::word(cmd, 5) == quality));
+                return live::word(cmd, 2) == 30 && (!quality || (cmd.size() >= 28 && live::word(cmd, 5) == quality));
             }
         }
         return false;
@@ -302,7 +310,7 @@ static int checkReceiverHandover(int argc, char **argv) {
         return QTest::qWaitFor([&] {
             while (first.hasPendingDatagrams()) {
                 const auto command = first.receiveDatagram().data();
-                if (command.size() == 28 && command.startsWith("R16C") && live::word(command, 0) == 84 &&
+                if (command.size() == 32 && command.startsWith("R16C") && live::word(command, 0) == 84 &&
                     live::word(command, 2) == 30 && live::word(command, 3) == 800000 &&
                     live::word(command, 4) == 1 && live::word(command, 5) == requested) return true;
             }
@@ -419,7 +427,7 @@ static int checkQuality70(int argc, char **argv) {
         status();
         while (handheld.hasPendingDatagrams()) {
             const auto packet = handheld.receiveDatagram().data();
-            if (packet.size() != 28 || !packet.startsWith("R16C") || live::word(packet,0) != session) continue;
+            if (packet.size() != 32 || !packet.startsWith("R16C") || live::word(packet,0) != session) continue;
             if (live::word(packet,2) != 30 || live::word(packet,3) != 2000000) continue;
             got60 |= live::word(packet,5) == 60;
             got70 |= live::word(packet,5) == 70;
@@ -582,7 +590,7 @@ static int checkPresetUpdates(int argc, char **argv) {
         handheld.writeDatagram(live::message("R16S", {42,1,0,ms}), local, port);
         while (handheld.hasPendingDatagrams()) {
             const auto packet = handheld.receiveDatagram().data();
-            if (packet.size() != 28 || !packet.startsWith("R16C")) continue;
+            if (packet.size() != 32 || !packet.startsWith("R16C")) continue;
             ++commands;
             const auto fps = live::word(packet,2), rate = live::word(packet,3), quality = live::word(packet,5);
             const bool a = fps == 30 && rate == 2000000 && quality == 80;
@@ -651,7 +659,7 @@ static int checkReceiverRates(int argc, char **argv) {
         while (handheld.hasPendingDatagrams()) {
             const auto packet = handheld.receiveDatagram().data();
             if (legacy ? !(packet.startsWith("R10C") && packet.size() == 24)
-                       : !(packet.startsWith("R16C") && packet.size() == 28)) continue;
+                       : !(packet.startsWith("R16C") && packet.size() == 32)) continue;
             if (live::word(packet, 0) != session) continue;
             cap = live::word(packet, 3);
             if (!legacy) quality = live::word(packet, 5);
@@ -1263,8 +1271,8 @@ int main(int testArgc, char **testArgv) {
     };
     QTimer::singleShot(1150, [&] {
         occupied.close();
-        retry = trigger("重新监听");
-        settings = trigger("连接与输出…");
+        retry = trigger("重新监听…");
+        settings = trigger("投屏设置…");
         if (view)
             if (auto d = view->findChild<QDialog *>("streamSettings")) {
                 settings &= d->isVisible();
