@@ -6,6 +6,8 @@
 #include "live_stats.h"
 #include "live_status.h"
 #include "live_net.h"
+#include "live_row.h"
+#include "live_r20.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -93,25 +95,10 @@ static u64 compactSavedBytes;
 static u32 compactFrames, compactFallbacks;
 /* Each optional reference bank holds up to 180 KiB. Larger pairs can still
  * travel as independent JPEGs within the per-screen and receive limits. */
-#define ROW_PAIR_BYTES (180u * 1024u)
-typedef struct {
-	u32 seq, stamp, length[2];
-	LiveJpegRows rows[2];
-	_Alignas(LZ4_stream_t) u8 bytes[ROW_PAIR_BYTES];
-} RowAnchor;
-typedef struct {
-	u32 compact[2], wire[2], trialSize, bottomDeltaBytes;
-	const u8 *bottomDelta, *bottomCompressed;
-	LiveJpegRows rows[2];
-	bool valid;
-} RowPairPlan;
-static RowAnchor *rowBanks, *rowBase, *rowCandidate, *rowProbe;
+static struct row_anchor *rowBanks, *rowBase, *rowCandidate, *rowProbe;
 /* Only the encoder builds/reuses this dictionary. Acknowledging a new
  * reference changes rowBase, but never modifies either bank's bytes. */
-static const RowAnchor *r20Prepared;
-static LZ4_stream_t *r20Dictionary;
-static u64 r20LastAck, r20EncodeUs, r20LastAttempt, r20Saved;
-static u32 r20Attempts, r20Panels, r20MaxUs, r20MeanUs, r20Skipped;
+static struct live_r20 r20;
 _Static_assert(MAX_JPEG % _Alignof(LZ4_stream_t) == 0 &&
 		   ROW_PAIR_BYTES % _Alignof(LZ4_stream_t) == 0,
 	       "LZ4 workspaces at arena ends must be aligned");
@@ -297,87 +284,24 @@ static u32 pack_panel(unsigned sc, unsigned q, u8 *out, u32 capacity)
 	return jobSize[sc];
 }
 
-static const u8 *row_panel(const RowAnchor *ref, unsigned sc)
+static u32 row_size(const struct row_pair_plan *plan, unsigned sc,
+		    const struct row_anchor *ref)
 {
-	return ref->bytes + (sc ? ref->length[0] : 0);
-}
-
-static u32 row_size(const RowPairPlan *plan, unsigned sc, const RowAnchor *ref)
-{
-	size_t delta = live_jpeg_rows_pack(
-	    NULL, 0, encoded[sc], plan->compact[sc], &plan->rows[sc],
-	    row_panel(ref, sc), ref->length[sc], &ref->rows[sc], ref->seq);
+	size_t delta =
+	    live_jpeg_rows_pack(NULL, 0, encoded[sc], plan->compact[sc],
+				&plan->rows[sc], row_anchor_panel(ref, sc),
+				ref->length[sc], &ref->rows[sc], ref->seq);
 	return delta ? (u32)delta : plan->compact[sc];
-}
-
-static bool r20_recent(u64 now)
-{
-	return r20LastAck && now >= r20LastAck &&
-	       now - r20LastAck < (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11;
-}
-
-/* Two dedicated encoder output arrays and the active reference bank have
- * unused tails for ordinary frames. Borrow those tails only when all three
- * live payloads fit. Large pairs retain the full original buffer capacity. */
-static void compress_bottom(RowPairPlan *plan, RowAnchor *base, u64 nextEncode)
-{
-	u32 len = plan->wire[1], compact = plan->compact[1];
-	if (!base || len >= compact || len <= LIVE_JPEG_DELTA_HEADER + 1 ||
-	    base->length[0] + base->length[1] >
-		ROW_PAIR_BYTES - sizeof(LZ4_stream_t) ||
-	    compact + len > MAX_JPEG - sizeof(LZ4_stream_t) ||
-	    MAX_JPEG - plan->compact[0] <= 20)
-		return;
-	u64 began = svcGetSystemTick();
-	if (!live_r20_time_available(began, nextEncode, SYSCLOCK_ARM11,
-				     r20LastAttempt, r20MeanUs)) {
-		r20Skipped++;
-		return;
-	}
-	u8 *delta = encoded[1] + compact;
-	if (live_jpeg_rows_pack(delta, len, encoded[1], compact, &plan->rows[1],
-				row_panel(base, 1), base->length[1],
-				&base->rows[1], base->seq) != len)
-		return;
-	plan->bottomDelta = delta;
-	plan->bottomDeltaBytes = len;
-	if (r20Prepared != base) {
-		u8 *bankTail =
-		    base->bytes + ROW_PAIR_BYTES - sizeof(LZ4_stream_t);
-		r20Dictionary =
-		    live_r20_dictionary(bankTail, sizeof(LZ4_stream_t),
-					row_panel(base, 1), base->length[1]);
-		r20Prepared = base;
-	}
-	if (!r20Dictionary)
-		return;
-	u8 *out = encoded[0] + plan->compact[0];
-	LZ4_stream_t *work =
-	    (LZ4_stream_t *)(encoded[1] + MAX_JPEG - sizeof(LZ4_stream_t));
-	size_t bytes = live_r20_pack(out, MAX_JPEG - plan->compact[0], delta,
-				     len, base->seq, r20Dictionary, work);
-	u32 us = (u32)((svcGetSystemTick() - began) * 1000000 / SYSCLOCK_ARM11);
-	r20MeanUs =
-	    r20LastAttempt ? (u32)((3ull * r20MeanUs + us + 2) / 4) : us;
-	r20LastAttempt = began;
-	r20Attempts++;
-	r20EncodeUs += us;
-	if (us > r20MaxUs)
-		r20MaxUs = us;
-	if (bytes) {
-		plan->bottomCompressed = out;
-		plan->wire[1] = (u32)bytes;
-	}
 }
 
 /* Only the encoder writes the two anchor banks, at publication. The network
  * thread can acknowledge a bank during an encode but cannot change its bytes.
  */
-static void measure_pair(RowPairPlan *plan, unsigned q, bool combined,
-			 bool useRows, const RowAnchor *base,
-			 const RowAnchor *probe, bool bottomRows)
+static void measure_pair(struct row_pair_plan *plan, unsigned q, bool combined,
+			 bool useRows, const struct row_anchor *base,
+			 const struct row_anchor *probe, bool bottomRows)
 {
-	*plan = (RowPairPlan){.valid = useRows};
+	*plan = (struct row_pair_plan){.valid = useRows};
 	for (unsigned sc = 0; sc < 2; sc++) {
 		unsigned qs = q;
 		if (!useRows) {
@@ -406,17 +330,15 @@ static void measure_pair(RowPairPlan *plan, unsigned q, bool combined,
 			if (base)
 				plan->wire[sc] = row_size(plan, sc, base);
 			if (probe)
-				plan->trialSize += row_size(plan, sc, probe);
+				plan->trial_size += row_size(plan, sc, probe);
 		}
 }
 
-static void store_row_anchor(RowAnchor *ref, const RowPairPlan *plan, u32 seq,
+static void store_row_anchor(struct row_anchor *ref,
+			     const struct row_pair_plan *plan, u32 seq,
 			     u32 stamp)
 {
-	if (r20Prepared == ref) {
-		r20Prepared = NULL;
-		r20Dictionary = NULL;
-	}
+	live_r20_forget(&r20, ref);
 	ref->seq = seq;
 	ref->stamp = stamp;
 	for (unsigned sc = 0; sc < 2; sc++) {
@@ -430,8 +352,8 @@ static void store_row_anchor(RowAnchor *ref, const RowPairPlan *plan, u32 seq,
 /* Called under the publication lock. A probe uses the existing spare bank
  * and never goes on the network. The acknowledged base remains immutable
  * until the PC acknowledges a real candidate. */
-static bool needs_key(const RowPairPlan *plan, u64 now, u32 seq, u32 stamp,
-		      u32 budget)
+static bool needs_key(const struct row_pair_plan *plan, u64 now, u32 seq,
+		      u32 stamp, u32 budget)
 {
 	u32 full = plan->compact[0] + plan->compact[1];
 	if (!plan->valid || full > ROW_PAIR_BYTES || full > budget)
@@ -455,11 +377,11 @@ static bool needs_key(const RowPairPlan *plan, u64 now, u32 seq, u32 stamp,
 		rowTrial = (LiveRowTrial){0};
 		return false;
 	}
-	if (!plan->trialSize)
+	if (!plan->trial_size)
 		return false;
 	int decision = live_row_trial_observe(
 	    &rowTrial, live_combined_wire(wire),
-	    live_combined_wire(plan->trialSize), live_combined_wire(full));
+	    live_combined_wire(plan->trial_size), live_combined_wire(full));
 	if (!decision)
 		return false;
 	rowProbe = NULL;
@@ -470,8 +392,9 @@ static bool needs_key(const RowPairPlan *plan, u64 now, u32 seq, u32 stamp,
 /* Called with lock held. Full keys are eligible only when the complete wire
  * representation also fits the requested budget. Stale candidates are
  * replaced with a fresh capture rather than freezing the stream for an ACK. */
-static void publish_rows(const RowPairPlan *plan, const RowAnchor *base,
-			 LivePendingPair *pair, bool key, u64 now)
+static void publish_rows(const struct row_pair_plan *plan,
+			 const struct row_anchor *base, LivePendingPair *pair,
+			 bool key, u64 now)
 {
 	if (key) {
 		rowCandidate = rowBase == rowBanks ? rowBanks + 1 : rowBanks;
@@ -493,27 +416,27 @@ static void publish_rows(const RowPairPlan *plan, const RowAnchor *base,
 		} else
 			compactFallbacks++;
 		if (key) {
-			memcpy(out, row_panel(rowCandidate, sc),
+			memcpy(out, row_anchor_panel(rowCandidate, sc),
 			       pair->length[sc]);
-		} else if (sc == 1 && plan->bottomDelta) {
+		} else if (sc == 1 && plan->bottom_delta) {
 			memcpy(out,
-			       plan->bottomCompressed ? plan->bottomCompressed
-						      : plan->bottomDelta,
+			       plan->bottom_compressed ? plan->bottom_compressed
+						       : plan->bottom_delta,
 			       pair->length[sc]);
 			rowDeltas++;
 			rowBytesSaved +=
-			    plan->compact[sc] - plan->bottomDeltaBytes;
-			if (plan->bottomCompressed) {
-				r20Panels++;
-				r20Saved +=
-				    plan->bottomDeltaBytes - pair->length[sc];
+			    plan->compact[sc] - plan->bottom_delta_bytes;
+			if (plan->bottom_compressed) {
+				r20.panels++;
+				r20.saved +=
+				    plan->bottom_delta_bytes - pair->length[sc];
 			}
 		} else if (base && plan->compact[sc] &&
 			   plan->wire[sc] < plan->compact[sc]) {
 			pair->length[sc] = live_jpeg_rows_pack(
 			    out, pair->length[sc], encoded[sc],
 			    plan->compact[sc], &plan->rows[sc],
-			    row_panel(base, sc), base->length[sc],
+			    row_anchor_panel(base, sc), base->length[sc],
 			    &base->rows[sc], base->seq);
 			rowDeltas++;
 			rowBytesSaved += plan->compact[sc] - pair->length[sc];
@@ -577,8 +500,8 @@ struct pair_encode {
 	bool use_rows;
 	bool bottom_rows;
 	bool use_r20;
-	RowAnchor *base;
-	RowAnchor *probe;
+	struct row_anchor *base;
+	struct row_anchor *probe;
 	u64 next;
 };
 
@@ -627,7 +550,7 @@ static void encode_pair(struct pair_encode *e)
 	unsigned q = e->q;
 	u32 budget = e->budget;
 	u32 target_bytes = e->target_bytes;
-	RowPairPlan plan;
+	struct row_pair_plan plan;
 
 	if (!run_pair_job(1, q))
 		return;
@@ -648,7 +571,8 @@ static void encode_pair(struct pair_encode *e)
 		measure_pair(&plan, q, e->combined || e->target_q, e->use_rows,
 			     e->base, e->probe, e->bottom_rows);
 		if (e->use_r20 && plan.valid)
-			compress_bottom(&plan, e->base, e->next);
+			live_r20_compress(&r20, &plan, e->base, e->next,
+					  encoded[0], encoded[1], MAX_JPEG);
 		u32 total = plan.wire[0] + plan.wire[1];
 		if (jobSize[0] && jobSize[1] && total <= budget)
 			break;
@@ -712,9 +636,10 @@ static void encode_pair(struct pair_encode *e)
 	u32 current_budget =
 	    pair_payload_budget(rate, e->job_fps, e->combined, e->target_q);
 
-	if (plan.bottomCompressed && !r20_recent(svcGetSystemTick())) {
-		plan.bottomCompressed = NULL;
-		plan.wire[1] = plan.bottomDeltaBytes;
+	if (plan.bottom_compressed &&
+	    !live_r20_recent(&r20, svcGetSystemTick())) {
+		plan.bottom_compressed = NULL;
+		plan.wire[1] = plan.bottom_delta_bytes;
 		payload_total = plan.wire[0] + plan.wire[1];
 	}
 	if (e->epoch == configEpoch && (!e->base || e->base == rowBase) &&
@@ -731,7 +656,7 @@ static void encode_pair(struct pair_encode *e)
 		    .seq = e->seq,
 		    .stamp = e->stamp,
 		    .epoch = e->epoch,
-		    .r20 = !key && plan.bottomCompressed};
+		    .r20 = !key && plan.bottom_compressed};
 		u32 bytes = live_pending_bytes(&incoming);
 		bool overflow =
 		    !live_pending_fits(&pending, bytes, sizeof pendingBytes);
@@ -810,9 +735,10 @@ static void encoder(void *arg)
 		unsigned targetQ = qualityTarget;
 		bool useRows = rowsEnabled && combined && compactJpeg;
 		bool bottomRows = combined;
-		bool useR20 = useRows && bottomRows && r20_recent(now);
-		RowAnchor *base = useRows ? rowBase : NULL;
-		RowAnchor *probe = useRows ? rowProbe : NULL;
+		bool useR20 =
+		    useRows && bottomRows && live_r20_recent(&r20, now);
+		struct row_anchor *base = useRows ? rowBase : NULL;
+		struct row_anchor *probe = useRows ? rowProbe : NULL;
 		LightLock_Unlock(&lock);
 		if (stopped())
 			break;
@@ -987,7 +913,7 @@ static void reset_peer_config(void)
 	rowLastAck = 0;
 	configSequence = 0;
 	LightLock_Lock(&lock);
-	r20LastAck = 0;
+	r20.last_ack = 0;
 	if (rowsEnabled)
 		row_peer(false, false);
 	else {
@@ -1112,7 +1038,7 @@ static void control_ack_r20(u64 now)
 	if (!rowBanks || !compactJpeg || !combinedFec)
 		return;
 	LightLock_Lock(&lock);
-	r20LastAck = now;
+	r20.last_ack = now;
 	LightLock_Unlock(&lock);
 	peer_activity(now);
 }
@@ -1549,7 +1475,7 @@ static bool sender_prepare(struct tx_frame *tx)
 		const LivePendingPair *head = &pending.slots[pending.head];
 
 		if (head->epoch != configEpoch ||
-		    (head->r20 && !r20_recent(now)))
+		    (head->r20 && !live_r20_recent(&r20, now)))
 			discard_pending(pending.head, TIMING_RECONFIGURED);
 		else if (live_pending_expired(head, now, SYSCLOCK_ARM11, fps)) {
 			discard_pending(pending.head, TIMING_TOO_OLD);
@@ -1632,7 +1558,8 @@ static bool sender_prepare(struct tx_frame *tx)
 					  (sc ? pair->length[0] : 0);
 
 			memcpy(tx->sending[sc],
-			       send_key ? row_panel(rowCandidate, sc) : panel,
+			       send_key ? row_anchor_panel(rowCandidate, sc)
+					: panel,
 			       tx->sizes[sc]);
 		}
 		live_pending_remove(&pending, slot);
@@ -1837,10 +1764,7 @@ Result live_start(void *(*allocate)(u32 bytes))
 	compactFrames = compactFallbacks = 0;
 	rowsEnabled = false;
 	rowBase = rowCandidate = rowProbe = rowBanks = NULL;
-	r20Prepared = NULL;
-	r20Dictionary = NULL;
-	r20LastAck = r20EncodeUs = r20LastAttempt = r20Saved = 0;
-	r20Attempts = r20Panels = r20MaxUs = r20MeanUs = r20Skipped = 0;
+	live_r20_init(&r20);
 	rowKeys = rowRepeats = rowDeltas = rowAcks = rowSends = 0;
 	manualRenderFailures = manualWireDrops = 0;
 	repairHistory = (LiveRepairHistory){0};
@@ -2005,12 +1929,12 @@ void live_stop(void)
 	    .row_key_acks = rowAcks,
 	    .row_delta_panels = rowDeltas,
 	    .row_bytes_saved = rowBytesSaved,
-	    .r20_attempts = r20Attempts,
-	    .r20_skipped = r20Skipped,
-	    .r20_panels = r20Panels,
-	    .r20_bytes_saved = r20Saved,
-	    .r20_encode_sum_us = r20EncodeUs,
-	    .r20_encode_max_us = r20MaxUs,
+	    .r20_attempts = r20.attempts,
+	    .r20_skipped = r20.skipped,
+	    .r20_panels = r20.panels,
+	    .r20_bytes_saved = r20.saved,
+	    .r20_encode_sum_us = r20.encode_sum_us,
+	    .r20_encode_max_us = r20.max_us,
 	    .audio_enabled = audioEnabled,
 	    .audio_blocks_queued = audio.queue.queued,
 	    .audio_blocks_dropped = audio.queue.dropped,
