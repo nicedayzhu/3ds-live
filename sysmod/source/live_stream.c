@@ -721,19 +721,24 @@ static void encode_pair(struct pair_encode *e)
 	pair_publish(e, &plan, q, budget, target_bytes);
 }
 
+static void encoder_bottom_worker(void)
+{
+	while (!stopped()) {
+		LightEvent_WaitTimeout(&events[1], 100000000);
+		if (stopped())
+			break;
+		if (__atomic_load_n(&jobDone, __ATOMIC_ACQUIRE))
+			continue;
+		encode_job(1, jobKind, jobQuality);
+		__atomic_store_n(&jobDone, 1, __ATOMIC_RELEASE);
+		LightEvent_Signal(&events[2]);
+	}
+}
+
 static void encoder(void *arg)
 {
 	if ((uintptr_t)arg) {
-		while (!stopped()) {
-			LightEvent_WaitTimeout(&events[1], 100000000);
-			if (stopped())
-				break;
-			if (__atomic_load_n(&jobDone, __ATOMIC_ACQUIRE))
-				continue;
-			encode_job(1, jobKind, jobQuality);
-			__atomic_store_n(&jobDone, 1, __ATOMIC_RELEASE);
-			LightEvent_Signal(&events[2]);
-		}
+		encoder_bottom_worker();
 		return;
 	}
 	u64 next = svcGetSystemTick();
