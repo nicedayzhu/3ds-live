@@ -77,25 +77,27 @@ cd android && ./gradlew testDebugUnitTest
 - `live_start()` / `stream_reset()` / `stream_open_resources()`；
 - `live_stop()` / `stream_join_threads()` / `stream_close_resources()` / `stream_write_stats()`。
 
-尚未完成：掌机实机回归、`live_encoder` / `live_sender` 文件级拆分、
-`struct live_stream` 状态收敛。
-
 ## 最终交付状态
 
 2026-11-26 的最终验证（`scripts/verify-all.ps1`）：
 
 - 3DS 交叉编译通过；
-- kernel style 75 个文件通过；
+- kernel style 79 个文件通过；
 - native tests 23/23 通过；
 - PC 客户端构建通过；
 - Android analyze + unit test 通过。
 
-本次**没有**把 `live_stream.c` 完全拆空，也没有做掌机实机回归。以下仍是后续工作：
+文件级拆分结果：
 
-1. `live_encoder.c` / `live_sender.c` 文件级拆分；
-2. 把 pending、repair arena、row anchor、编码工作区收敛到 `struct live_stream`；
-3. 掌机实机验证视频、音频、repair 压力和长时间运行；
-4. 针对实机结果的性能回归（当前只有编译与主机协议测试）。
+| 文件 | 行数 | 职责 |
+| --- | ---: | --- |
+| `live_stream.c` | ~640 | 生命周期、配置、公开 API、report flush |
+| `live_encoder.c` | 769 | 编码、行复用、R20、发布 |
+| `live_sender.c` | 440 | pacing、repair、发送队列、sender 线程 |
+| `live_control_loop.c` | 452 | 控制接收、发现分发、状态 burst |
+| `live_stream_internal.h` | 164 | `struct live_stream` 与跨文件接口 |
 
-因此这次重构应视为“风格基线 + 外围模块化 + 核心函数拆分”的交付，
-而不是整个 3DS 端代码的最终形态。
+所有流状态（settings/counters/buffers/runtime/row/control/net/audio/r20/
+repair/pending）都在 `struct live_stream` 中，`live_stream.c` 只保留一个实例。
+
+剩余工作只有掌机实机回归（用户计划稍后执行），不属于代码拆分阻塞项。
