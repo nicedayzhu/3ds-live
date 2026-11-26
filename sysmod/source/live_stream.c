@@ -3,6 +3,7 @@
 #include "live_net_report.h"
 #include "live_audio_sender.h"
 #include "live_control.h"
+#include "live_stats.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -2098,120 +2099,100 @@ void live_stop(void)
 		rawWorking[i] =
 		    NULL; /* Caller releases the complete SYSTEM arena. */
 	}
-	FILE *f = fopen("sdmc:/3ds/3ds-live/live-stats.txt", "w");
-	if (!f)
-		return;
-	char networkText[LIVE_NET_REPORT_BYTES];
-	size_t networkBytes =
-	    network_report_text(networkText, sizeof networkText);
-	fwrite(networkText, 1, networkBytes, f);
-#ifdef LIVE_FRAME_TIMING
-	fprintf(f, "timing_session=%08lx\ntiming_saved=%u\n",
-		(unsigned long)session, timingSaved ? 1u : 0u);
-#endif
-	fprintf(f,
-		"version=%s\nsent_top=%lu\nsent_bottom=%lu\nreplaced=%lu\nsend_"
-		"errors=%lu\nrate=%lu\nfps=%lu\n",
-		combinedFec ? "live-r10-fec4-candidate" : "live-r9-audio",
-		frames[0], frames[1], replaced, errors, rate, fps);
-	fprintf(
-	    f,
-	    "duration_ms=%llu\nexpired_pairs=%lu\nlast_send_errno=%d\nadaptive="
-	    "0\npair_jpeg_budget=%lu\n",
-	    (svcGetSystemTick() - started) * 1000 / SYSCLOCK_ARM11, expired,
-	    lastErrno,
-	    (u32)live_pair_budget(live_av_video_rate(rate, audioEnabled), fps));
-	fprintf(f, "payload_target_percent=%u\n", payloadControl.percent);
-	fprintf(f,
-		"r20_attempts=%lu\nr20_skipped_for_time=%lu\nr20_panels_queued="
-		"%lu\nr20_bytes_saved_queued=%llu\nr20_encode_mean_us=%"
-		"llu\nr20_encode_max_us=%lu\n",
-		r20Attempts, r20Skipped, r20Panels, r20Saved,
-		r20Attempts ? r20EncodeUs / r20Attempts : 0, r20MaxUs);
-	fprintf(f,
-		"combined_fec=%u\npair_payload_budget=%lu\nquality_target=%u\n",
-		combinedFec ? 1u : 0u,
+	char network_text[LIVE_NET_REPORT_BYTES];
+	size_t network_bytes;
+	struct live_stats stats = {
+	    .combined_fec = combinedFec,
+	    .sent_top = frames[0],
+	    .sent_bottom = frames[1],
+	    .replaced = replaced,
+	    .send_errors = errors,
+	    .rate = rate,
+	    .fps = fps,
+	    .duration_ms =
+		(svcGetSystemTick() - started) * 1000 / SYSCLOCK_ARM11,
+	    .expired_pairs = expired,
+	    .last_send_errno = lastErrno,
+	    .payload_target_percent = payloadControl.percent,
+	    .quality_target = qualityTarget,
+	    .pair_payload_budget =
 		pair_payload_budget(rate, fps, combinedFec, qualityTarget),
-		qualityTarget);
-	fprintf(f, "rate_pending_kept=%lu\nrate_encoding_kept=%lu\n",
-		ratePendingKept, rateEncodingKept);
-	fprintf(f,
-		"pairs_attempted=%lu\npairs_oversize=%lu\nrequantize_passes=%"
-		"lu\nquality=%u\nfec_stripes=%u\nconfig_changes=%lu\n",
-		pairs, oversize, retries, quality,
-		combinedFec ? LIVE_PAIR_PARITY : LIVE_PARITY, configChanges);
-	fprintf(f, "manual_render_failures=%lu\nmanual_wire_budget_drops=%lu\n",
-		manualRenderFailures, manualWireDrops);
-	fprintf(
-	    f,
-	    "repair_requests=%lu\nrepair_packets=%lu\nrepair_ipv4_bytes=%lu\n",
-	    repairRequests, repairPackets, repairWireBytes);
-	fprintf(f,
-		"repair_nack_cache_miss=%lu\nrepair_nack_stale=%lu\nrepair_"
-		"nack_duplicate=%lu\nrepair_nack_invalid=%lu\n"
-		"repair_fragments_expired=%lu\nrepair_fragments_evicted=%lu\n",
-		repairHistory.missing, repairHistory.stale,
-		repairHistory.duplicate, repairHistory.invalid,
-		repairHistory.expired_fragments,
-		repairHistory.evicted_fragments);
-	fprintf(f, "fec_scope=%s\nbudget_basis=%s\n",
-		combinedFec ? "pair" : "screen",
-		combinedFec ? "wire_payload" : "full_jpeg");
-	fprintf(f,
-		"send_calls=%lu\nsend_mean_us=%llu\nsend_max_us=%lu\nfeedback_"
-		"count=%lu\n",
-		sendCalls, sendCalls ? sendSumUs / sendCalls : 0, sendMaxUs,
-		feedbackCount);
-	fprintf(f, "video_wire_bytes=%llu\n", videoWireBytes);
-	fprintf(f, "send_timeout_ms=%u\n", LIVE_SEND_TIMEOUT_MS);
-	fprintf(f,
-		"source_layout=ycbcr420_mcu\nsnapshot_mean_us=%llu\nsnapshot_"
-		"max_us=%lu\n",
-		snapshotCount ? snapshotSumUs / snapshotCount : 0,
-		snapshotMaxUs);
-	fprintf(f,
-		"compact_jpeg=%u\ncompact_frames_queued=%lu\ncompact_bytes_"
-		"saved_queued=%llu\ncompact_fallbacks=%lu\n",
-		compactJpeg ? 1 : 0, compactFrames, compactSavedBytes,
-		compactFallbacks);
-	fprintf(f,
-		"row_keys=%lu\nrow_key_repeats=%lu\nrow_key_acks=%lu\nrow_"
-		"delta_panels=%lu\nrow_bytes_saved_queued=%llu\n",
-		rowKeys, rowRepeats, rowAcks, rowDeltas, rowBytesSaved);
-	fprintf(f,
-		"audio_enabled=%u\naudio_rate_mhz=%u\naudio_samples_per_block=%"
-		"u\naudio_blocks_queued=%lu\n"
-		"audio_queue_full=%lu\naudio_expired_blocks=%lu\naudio_packets_"
-		"sent=%lu\naudio_send_errors=%lu\n"
-		"audio_wire_bytes=%llu\naudio_encoded_blocks=%lu\naudio_encode_"
-		"mean_us=%llu\naudio_encode_max_us=%lu\n"
-		"audio_reserved_bytes_per_second=%lu\n",
-		audioEnabled ? 1u : 0u, LIVE_AUDIO_RATE_MHZ, LIVE_AUDIO_SAMPLES,
-		audio.queue.queued, audio.queue.dropped, audio.queue.expired,
-		audio.packets_sent, audio.send_errors, audio.wire_bytes,
-		audio.encoded_blocks,
-		audio.encoded_blocks
-		    ? audio.encode_sum_us / audio.encoded_blocks
-		    : 0,
-		audio.encode_max_us,
-		audioEnabled ? (u32)LIVE_AUDIO_RESERVE_BYTES : 0u);
-	for (unsigned i = 0; i < 2; i++)
-		fprintf(
-		    f,
-		    "screen%u_attempts=%lu\nscreen%u_jpeg=%lu\nscreen%u_encode_"
-		    "mean_us=%llu\nscreen%u_encode_max_us=%lu\n"
-		    "screen%u_max_bytes=%lu\nscreen%u_encoder_core=%ld\nscreen%"
-		    "u_changed_mcus=%llu\nscreen%u_source_reused=%lu\n"
-		    "screen%u_dma_converted=%lu\nscreen%u_convert_mean_us=%"
-		    "llu\nscreen%u_convert_max_us=%lu\nscreen%u_converted_mcus="
-		    "%llu\n",
-		    i, attempts[i], i, jpegFrames[i], i,
-		    attempts[i] ? sumUs[i] / attempts[i] : 0, i, maxUs[i], i,
-		    maxBytes[i], i, encoderCores[i], i, changedMcus[i], i,
-		    sourceReuse[i], i, convertCount[i], i,
-		    convertCount[i] ? convertSumUs[i] / convertCount[i] : 0, i,
-		    convertMaxUs[i], i, convertedMcus[i]);
-	fclose(f);
+	    .rate_pending_kept = ratePendingKept,
+	    .rate_encoding_kept = rateEncodingKept,
+	    .pairs_attempted = pairs,
+	    .pairs_oversize = oversize,
+	    .requantize_passes = retries,
+	    .quality = quality,
+	    .config_changes = configChanges,
+	    .manual_render_failures = manualRenderFailures,
+	    .manual_wire_budget_drops = manualWireDrops,
+	    .repair_requests = repairRequests,
+	    .repair_packets = repairPackets,
+	    .repair_wire_bytes = repairWireBytes,
+	    .repair_nack_cache_miss = repairHistory.missing,
+	    .repair_nack_stale = repairHistory.stale,
+	    .repair_nack_duplicate = repairHistory.duplicate,
+	    .repair_nack_invalid = repairHistory.invalid,
+	    .repair_fragments_expired = repairHistory.expired_fragments,
+	    .repair_fragments_evicted = repairHistory.evicted_fragments,
+	    .send_calls = sendCalls,
+	    .send_sum_us = sendSumUs,
+	    .send_max_us = sendMaxUs,
+	    .feedback_count = feedbackCount,
+	    .video_wire_bytes = videoWireBytes,
+	    .snapshot_count = snapshotCount,
+	    .snapshot_sum_us = snapshotSumUs,
+	    .snapshot_max_us = snapshotMaxUs,
+	    .compact_jpeg = compactJpeg,
+	    .compact_frames = compactFrames,
+	    .compact_saved_bytes = compactSavedBytes,
+	    .compact_fallbacks = compactFallbacks,
+	    .row_keys = rowKeys,
+	    .row_key_repeats = rowRepeats,
+	    .row_key_acks = rowAcks,
+	    .row_delta_panels = rowDeltas,
+	    .row_bytes_saved = rowBytesSaved,
+	    .r20_attempts = r20Attempts,
+	    .r20_skipped = r20Skipped,
+	    .r20_panels = r20Panels,
+	    .r20_bytes_saved = r20Saved,
+	    .r20_encode_sum_us = r20EncodeUs,
+	    .r20_encode_max_us = r20MaxUs,
+	    .audio_enabled = audioEnabled,
+	    .audio_blocks_queued = audio.queue.queued,
+	    .audio_blocks_dropped = audio.queue.dropped,
+	    .audio_blocks_expired = audio.queue.expired,
+	    .audio_packets_sent = audio.packets_sent,
+	    .audio_send_errors = audio.send_errors,
+	    .audio_wire_bytes = audio.wire_bytes,
+	    .audio_encoded_blocks = audio.encoded_blocks,
+	    .audio_encode_sum_us = audio.encode_sum_us,
+	    .audio_encode_max_us = audio.encode_max_us,
+	};
+	for (unsigned i = 0; i < 2; i++) {
+		stats.screens[i] = (struct live_stats_screen){
+		    .attempts = attempts[i],
+		    .jpeg = jpegFrames[i],
+		    .encode_sum_us = sumUs[i],
+		    .encode_max_us = maxUs[i],
+		    .max_bytes = maxBytes[i],
+		    .encoder_core = encoderCores[i],
+		    .changed_mcus = changedMcus[i],
+		    .source_reused = sourceReuse[i],
+		    .dma_converted = convertCount[i],
+		    .convert_sum_us = convertSumUs[i],
+		    .convert_max_us = convertMaxUs[i],
+		    .converted_mcus = convertedMcus[i],
+		};
+	}
+#ifdef LIVE_FRAME_TIMING
+	stats.timing_present = true;
+	stats.timing_session = session;
+	stats.timing_saved = timingSaved;
+#endif
+	network_bytes = network_report_text(network_text, sizeof(network_text));
+	live_stats_write("sdmc:/3ds/3ds-live/live-stats.txt", &stats,
+			 network_text, network_bytes);
 }
 bool live_submit(int sc, const u8 *frame, u32 fmt, u32 stride, u32 pts,
 		 bool wide)
