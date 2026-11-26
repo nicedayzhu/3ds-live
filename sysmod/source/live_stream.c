@@ -1129,6 +1129,102 @@ static const struct live_net_ops net_ops = {
     .reset_feedback = reset_receiver_feedback,
 };
 
+static void send_status_burst(u64 *due)
+{
+	u64 now = svcGetSystemTick();
+
+	now = svcGetSystemTick();
+	if (!net.media_ready || now - lastStatusTick < SYSCLOCK_ARM11)
+		return;
+	struct live_status_main status = {
+	    .session = session,
+	    .duration_ms = (u32)((now - started) * 1000 / SYSCLOCK_ARM11),
+	    .rate = rate,
+	    .video_rate = live_av_video_rate(rate, audioEnabled),
+	    .fps = fps,
+	    .encoded_top = live_encoded_frames(0),
+	    .encoded_bottom = live_encoded_frames(1),
+	    .sent_top = frames[0],
+	    .sent_bottom = frames[1],
+	    .send_errors = errors,
+	    .expired_pairs = expired,
+	    .feedback_count = feedbackCount,
+	    .encoder_core_top = encoderCores[0],
+	    .encoder_core_bottom = encoderCores[1],
+	    .last_encode_us_top =
+		__atomic_load_n(&lastEncodeUs[0], __ATOMIC_RELAXED),
+	    .last_encode_us_bottom =
+		__atomic_load_n(&lastEncodeUs[1], __ATOMIC_RELAXED),
+	    .audio_enabled = audioEnabled,
+	    .audio_blocks_queued =
+		__atomic_load_n(&audio.queue.queued, __ATOMIC_RELAXED),
+	    .audio_blocks_dropped =
+		__atomic_load_n(&audio.queue.dropped, __ATOMIC_RELAXED) +
+		__atomic_load_n(&audio.queue.expired, __ATOMIC_RELAXED),
+	    .audio_packets_sent = audio.packets_sent,
+	    .audio_queue_depth = live_audio_queue_depth(&audio.queue),
+	};
+	uint32_t pacing_words[LIVE_PACING_WORDS];
+	LightLock_Lock(&lock);
+	uint32_t overwritten = replaced;
+	LightLock_Unlock(&lock);
+	live_packet_snapshot(&packetReport, pacing_words, session,
+			     status.duration_ms, pacingMode, started,
+			     SYSCLOCK_ARM11);
+	struct live_status_aux aux = {
+	    .session = session,
+	    .duration_ms = status.duration_ms,
+	    .quality_target = qualityTarget,
+	    .overwritten = overwritten,
+	    .row_repeats = rowRepeats,
+	    .repair_requests = repairRequests,
+	    .repair_packets = repairPackets,
+	    .repair_wire_bytes = repairWireBytes,
+	    .audio_dropped = audio.queue.dropped,
+	    .audio_expired = audio.queue.expired,
+	    .send_active_us =
+		(u32)(sendActiveTicks / SYSCLOCK_ARM11 * 1000000ull +
+		      (sendActiveTicks % SYSCLOCK_ARM11) * 1000000ull /
+			  SYSCLOCK_ARM11),
+	    .compact_jpeg = compactJpeg,
+	    .rows_enabled = rowBanks != NULL,
+	    .combined_fec = combinedFec,
+	    .audio_wire_bytes = audio.wire_bytes,
+	    .video_wire_bytes = videoWireBytes,
+	    .pacing_mode = pacingMode,
+	};
+	memcpy(aux.pacing_words, pacing_words, sizeof(aux.pacing_words));
+	u8 burst[512];
+	struct live_status_packet packets[LIVE_STATUS_MAX_PACKETS];
+	unsigned packet_count =
+	    live_status_build_burst(burst, sizeof(burst), &status, &aux,
+				    packets, LIVE_STATUS_MAX_PACKETS);
+	if (!packet_count)
+		return;
+	lastStatusTick =
+	    send_status(due, burst + packets[0].offset, packets[0].size);
+	for (unsigned i = 1; i < packet_count; i++)
+		send_status(due, burst + packets[i].offset, packets[i].size);
+#ifdef LIVE_FRAME_TIMING
+	u32 capacity;
+	if (live_timing_marker(lastStatusTick, &capacity)) {
+		u8 marker[24];
+		memcpy(marker, "R12D", 4);
+		put32(marker + 4, session);
+		put32(marker + 8, 1);
+		put32(marker + 12, capacity);
+		pacing_sleep_until(*due);
+		u64 call = svcGetSystemTick();
+		put32(marker + 16, (u32)call);
+		put32(marker + 20, (u32)(call >> 32));
+		sendto(net.fd, marker, sizeof marker, 0,
+		       (struct sockaddr *)&net.target, sizeof net.target);
+		pacing_charge(due, call, svcGetSystemTick(), sizeof marker + 28,
+			      PACKET_STATUS);
+	}
+#endif
+}
+
 static void control(u64 *due)
 {
 	u64 now = svcGetSystemTick();
@@ -1237,97 +1333,9 @@ static void control(u64 *due)
 	/* Consume queued acknowledgements before expiring the lease, rotating
 	 * the challenge or closing the only socket that can receive them. */
 	live_net_poll(&net, session, svcGetSystemTick(), due, &net_ops);
-	now = svcGetSystemTick();
-	if (!net.media_ready || now - lastStatusTick < SYSCLOCK_ARM11)
-		return;
-	struct live_status_main status = {
-	    .session = session,
-	    .duration_ms = (u32)((now - started) * 1000 / SYSCLOCK_ARM11),
-	    .rate = rate,
-	    .video_rate = live_av_video_rate(rate, audioEnabled),
-	    .fps = fps,
-	    .encoded_top = live_encoded_frames(0),
-	    .encoded_bottom = live_encoded_frames(1),
-	    .sent_top = frames[0],
-	    .sent_bottom = frames[1],
-	    .send_errors = errors,
-	    .expired_pairs = expired,
-	    .feedback_count = feedbackCount,
-	    .encoder_core_top = encoderCores[0],
-	    .encoder_core_bottom = encoderCores[1],
-	    .last_encode_us_top =
-		__atomic_load_n(&lastEncodeUs[0], __ATOMIC_RELAXED),
-	    .last_encode_us_bottom =
-		__atomic_load_n(&lastEncodeUs[1], __ATOMIC_RELAXED),
-	    .audio_enabled = audioEnabled,
-	    .audio_blocks_queued =
-		__atomic_load_n(&audio.queue.queued, __ATOMIC_RELAXED),
-	    .audio_blocks_dropped =
-		__atomic_load_n(&audio.queue.dropped, __ATOMIC_RELAXED) +
-		__atomic_load_n(&audio.queue.expired, __ATOMIC_RELAXED),
-	    .audio_packets_sent = audio.packets_sent,
-	    .audio_queue_depth = live_audio_queue_depth(&audio.queue),
-	};
-	uint32_t pacing_words[LIVE_PACING_WORDS];
-	LightLock_Lock(&lock);
-	uint32_t overwritten = replaced;
-	LightLock_Unlock(&lock);
-	live_packet_snapshot(&packetReport, pacing_words, session,
-			     status.duration_ms, pacingMode, started,
-			     SYSCLOCK_ARM11);
-	struct live_status_aux aux = {
-	    .session = session,
-	    .duration_ms = status.duration_ms,
-	    .quality_target = qualityTarget,
-	    .overwritten = overwritten,
-	    .row_repeats = rowRepeats,
-	    .repair_requests = repairRequests,
-	    .repair_packets = repairPackets,
-	    .repair_wire_bytes = repairWireBytes,
-	    .audio_dropped = audio.queue.dropped,
-	    .audio_expired = audio.queue.expired,
-	    .send_active_us =
-		(u32)(sendActiveTicks / SYSCLOCK_ARM11 * 1000000ull +
-		      (sendActiveTicks % SYSCLOCK_ARM11) * 1000000ull /
-			  SYSCLOCK_ARM11),
-	    .compact_jpeg = compactJpeg,
-	    .rows_enabled = rowBanks != NULL,
-	    .combined_fec = combinedFec,
-	    .audio_wire_bytes = audio.wire_bytes,
-	    .video_wire_bytes = videoWireBytes,
-	    .pacing_mode = pacingMode,
-	};
-	memcpy(aux.pacing_words, pacing_words, sizeof(aux.pacing_words));
-	u8 burst[512];
-	struct live_status_packet packets[LIVE_STATUS_MAX_PACKETS];
-	unsigned packet_count =
-	    live_status_build_burst(burst, sizeof(burst), &status, &aux,
-				    packets, LIVE_STATUS_MAX_PACKETS);
-	if (!packet_count)
-		return;
-	lastStatusTick =
-	    send_status(due, burst + packets[0].offset, packets[0].size);
-	for (unsigned i = 1; i < packet_count; i++)
-		send_status(due, burst + packets[i].offset, packets[i].size);
-#ifdef LIVE_FRAME_TIMING
-	u32 capacity;
-	if (live_timing_marker(lastStatusTick, &capacity)) {
-		u8 marker[24];
-		memcpy(marker, "R12D", 4);
-		put32(marker + 4, session);
-		put32(marker + 8, 1);
-		put32(marker + 12, capacity);
-		pacing_sleep_until(*due);
-		u64 call = svcGetSystemTick();
-		put32(marker + 16, (u32)call);
-		put32(marker + 20, (u32)(call >> 32));
-		sendto(net.fd, marker, sizeof marker, 0,
-		       (struct sockaddr *)&net.target, sizeof net.target);
-		pacing_charge(due, call, svcGetSystemTick(), sizeof marker + 28,
-			      PACKET_STATUS);
-	}
-#endif
+	send_status_burst(due);
 }
+
 typedef struct {
 	u64 totalDue;
 	LiveVideoPacing video;
@@ -1335,7 +1343,8 @@ typedef struct {
 } PacketPacing;
 
 /* Use spare wire time between fresh packets. A repair shares the strict
- * total clock with audio and never advances the fresh video's slot clock. */
+ * total clock with audio and never advances the fresh video's slot
+ * clock. */
 static bool send_repair(u64 *totalDue, u64 now, u64 nextFreshDue)
 {
 	if (!repairCredit || now < *totalDue || stopped() || capture_paused())
@@ -1500,9 +1509,10 @@ static void sender(void *unused)
 			seq = pair->seq;
 			stamp = pair->stamp;
 			queued = pair->queued;
-			/* Selective repair protects the original key without
-			 * sacrificing a new capture slot. Legacy receivers
-			 * still get adjacent copies. */
+			/* Selective repair protects the original key
+			 * without sacrificing a new capture slot.
+			 * Legacy receivers still get adjacent copies.
+			 */
 			bool selective =
 			    repairPeerAt &&
 			    now - repairPeerAt <
@@ -1549,9 +1559,10 @@ static void sender(void *unused)
 				    &repairHistory, sizeof sendArena, sizes[0],
 				    sizes[1], seq, stamp, fps, reserved, until);
 			} else {
-				/* A single-screen stream has no second panel,
-				 * so it cannot share the two-panel repair
-				 * arena; send it directly without repair. */
+				/* A single-screen stream has no second
+				 * panel, so it cannot share the
+				 * two-panel repair arena; send it
+				 * directly without repair. */
 				singleFrame = (LiveRepairFrame){0};
 				singleFrame.top = sizes[0];
 				singleFrame.bottom = sizes[1];
@@ -1624,9 +1635,9 @@ static void sender(void *unused)
 		if (shared) {
 			u8 fragment[LIVE_CHUNK];
 			u32 count = dataCount;
-			/* Shift repeated keys by a third so the same short
-			 * Wi-Fi fade need not erase the same offsets on each
-			 * pass. */
+			/* Shift repeated keys by a third so the same
+			 * short Wi-Fi fade need not erase the same
+			 * offsets on each pass. */
 			u32 index = repeat * count / 3;
 			for (u32 step = 0; ok && step < count; step++) {
 				u32 len = live_pair_fragment(
@@ -1803,8 +1814,9 @@ Result live_start(void *(*allocate)(u32 bytes))
 		return rc;
 	}
 	socReady = true;
-	/* DMA buffers are mapped later when the LCD modes become known. Leave
-	 * room for both at maximum stride before taking any optional memory. */
+	/* DMA buffers are mapped later when the LCD modes become known.
+	 * Leave room for both at maximum stride before taking any
+	 * optional memory. */
 	const u32 rowPages = (2 * sizeof(*rowBanks) + 4095u) & ~4095u;
 	if (compactJpeg &&
 	    live_pages_available(rowPages + LIVE_CAPTURE_MAX_DMA_BYTES))
@@ -1861,8 +1873,8 @@ void live_stop(void)
 		live_jpeg_reset(i);
 		live_jpeg_source_destroy(rawSources[i]);
 		rawSources[i] = NULL;
-		rawWorking[i] =
-		    NULL; /* Caller releases the complete SYSTEM arena. */
+		rawWorking[i] = NULL; /* Caller releases the complete
+					 SYSTEM arena. */
 	}
 	char network_text[LIVE_NET_REPORT_BYTES];
 	size_t network_bytes;
@@ -1967,9 +1979,9 @@ bool live_submit(int sc, const u8 *frame, u32 fmt, u32 stride, u32 pts,
 		return false;
 	u64 begin = svcGetSystemTick();
 	u32 w = sc ? 320 : 400;
-	/* Exact native-source comparison precedes color conversion. Only
-	 * changed MCUs enter the compact YCbCr420 snapshot; no RGB565 staging
-	 * frame. */
+	/* Exact native-source comparison precedes color conversion.
+	 * Only changed MCUs enter the compact YCbCr420 snapshot; no
+	 * RGB565 staging frame. */
 	LightLock_Lock(&rawLocks[sc]);
 	int converted = live_jpeg_source_update(
 	    rawSources[sc], frame, (size_t)w * stride, fmt, stride);
