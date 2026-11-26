@@ -735,6 +735,65 @@ static void encoder_bottom_worker(void)
 	}
 }
 
+struct encoder_plan {
+	u32 stamp;
+	u32 wanted[2];
+	u32 job_rate;
+	u32 job_fps;
+	u32 epoch;
+	unsigned target_q;
+	bool combined;
+	bool use_rows;
+	bool bottom_rows;
+	bool use_r20;
+	struct row_anchor *base;
+	struct row_anchor *probe;
+};
+
+/* Called with the stream lock held only inside this helper. */
+static bool encoder_read_plan(struct encoder_plan *plan,
+			      LiveConsumedPlan *consumed, u64 now)
+{
+	LightLock_Lock(&lock);
+	plan->stamp = planStamp;
+	plan->wanted[0] = planPts[0];
+	plan->wanted[1] = planPts[1];
+	plan->job_rate = rate;
+	plan->job_fps = fps;
+	plan->epoch = configEpoch;
+	plan->combined = combinedFec && screenMask == 3;
+	plan->target_q = qualityTarget;
+	plan->use_rows = rowsEnabled && plan->combined && compactJpeg;
+	plan->bottom_rows = plan->combined;
+	plan->use_r20 =
+	    plan->use_rows && plan->bottom_rows && live_r20_recent(&r20, now);
+	plan->base = plan->use_rows ? rowBase : NULL;
+	plan->probe = plan->use_rows ? rowProbe : NULL;
+	bool ready =
+	    planMask == 3 && live_plan_available(consumed, plan->stamp);
+	LightLock_Unlock(&lock);
+	return ready;
+}
+
+static bool encoder_snapshot_raw(const struct encoder_plan *plan, u32 *source)
+{
+	bool ready = true;
+
+	for (unsigned i = 0; ready && i < 2; i++) {
+		LightLock_Lock(&rawLocks[i]);
+		if (!rawValid[i] || rawPts[i] != plan->wanted[i]) {
+			ready = false;
+		} else {
+			memcpy(rawWorking[i],
+			       live_jpeg_source_frame(rawSources[i]),
+			       rawBytes[i]);
+			source[i] = rawPts[i];
+		}
+		LightLock_Unlock(&rawLocks[i]);
+	}
+	return ready;
+}
+
 static void encoder(void *arg)
 {
 	if ((uintptr_t)arg) {
@@ -756,51 +815,32 @@ static void encoder(void *arg)
 				       SYSCLOCK_ARM11);
 			continue;
 		}
-		bool ready;
-		u32 stamp = 0, source[2] = {0, 0}, wanted[2], jobRate, jobFps,
-		    epoch;
-		LightLock_Lock(&lock);
-		stamp = planStamp;
-		ready = planMask == 3 && live_plan_available(&consumed, stamp);
-		wanted[0] = planPts[0];
-		wanted[1] = planPts[1];
-		jobRate = rate;
-		jobFps = fps;
-		epoch = configEpoch;
-		bool combined = combinedFec && screenMask == 3;
-		unsigned targetQ = qualityTarget;
-		bool useRows = rowsEnabled && combined && compactJpeg;
-		bool bottomRows = combined;
-		bool useR20 =
-		    useRows && bottomRows && live_r20_recent(&r20, now);
-		struct row_anchor *base = useRows ? rowBase : NULL;
-		struct row_anchor *probe = useRows ? rowProbe : NULL;
-		LightLock_Unlock(&lock);
-		if (stopped())
-			break;
-		/* The capture thread converts directly into each pending
-		 * buffer.  A per-screen lock keeps that relatively long
-		 * operation off the socket and configuration lock while
-		 * preserving one complete pair here. */
-		u64 snapshotBegin = svcGetSystemTick();
-		for (unsigned i = 0; ready && i < 2; i++) {
-			LightLock_Lock(&rawLocks[i]);
-			if (!rawValid[i] || rawPts[i] != wanted[i])
-				ready = false;
-			else {
-				memcpy(rawWorking[i],
-				       live_jpeg_source_frame(rawSources[i]),
-				       rawBytes[i]);
-				source[i] = rawPts[i];
-			}
-			LightLock_Unlock(&rawLocks[i]);
-		}
-		if (!ready) {
+		struct encoder_plan plan;
+		u32 source[2] = {0, 0};
+
+		if (!encoder_read_plan(&plan, &consumed, now)) {
 			LightEvent_WaitTimeout(&events[0], 1000000);
 			continue;
 		}
+		if (stopped())
+			break;
+		u64 snapshot_begin = svcGetSystemTick();
+
+		if (!encoder_snapshot_raw(&plan, source)) {
+			LightEvent_WaitTimeout(&events[0], 1000000);
+			continue;
+		}
+		u32 stamp = plan.stamp, jobRate = plan.job_rate,
+		    jobFps = plan.job_fps, epoch = plan.epoch;
+		bool combined = plan.combined;
+		unsigned targetQ = plan.target_q;
+		bool useRows = plan.use_rows;
+		bool bottomRows = plan.bottom_rows;
+		bool useR20 = plan.use_r20;
+		struct row_anchor *base = plan.base;
+		struct row_anchor *probe = plan.probe;
 		live_plan_consume(&consumed, stamp);
-		u32 snapshotUs = (u32)((svcGetSystemTick() - snapshotBegin) *
+		u32 snapshotUs = (u32)((svcGetSystemTick() - snapshot_begin) *
 				       1000000 / SYSCLOCK_ARM11);
 		snapshotCount++;
 		snapshotSumUs += snapshotUs;
