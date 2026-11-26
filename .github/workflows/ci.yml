@@ -48,7 +48,7 @@ jobs:
           dkp-pacman -Syu --noconfirm
           dkp-pacman -S --noconfirm 3ds-dev 3dstools
           curl -fsSL -o /tmp/makerom.zip \
-            https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip
+            https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
           unzip -q /tmp/makerom.zip -d /tmp/makerom
           install -m 0755 /tmp/makerom/makerom /usr/local/bin/makerom
           curl -fsSL -o /tmp/bannertool.tar.gz \
