@@ -5,6 +5,7 @@
 #include "live_control.h"
 #include "live_stats.h"
 #include "live_status.h"
+#include "live_net.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -60,24 +61,14 @@ static LightLock lock, rawLocks[2];
 static LightEvent events[3];
 static Thread worker, encoders[2];
 static s32 encoderCores[2];
-static int fd = -1, lastErrno;
+static int lastErrno;
 #define SOC_ARENA_BYTES 0x100000u
-static struct sockaddr_in target;
 static LiveDiscovery discovery;
 static LiveReceiverFeedback receiverFeedback;
 static bool receiverVideo;
-static bool automaticHost, mediaReady;
 static bool capturePaused;
 static u64 lastProbeTick, lastPeerControl;
-static u32 localAddress, localMask;
-static struct {
-	u32 polls, probeAttempts, probesSent, replies, accepted, hints,
-	    hintsAnswered, reportedBroadcast, lastDestination;
-	int infoResult, infoErrno, socketErrno, bindErrno, sendErrno,
-	    receiveErrno;
-	unsigned localPort;
-	u64 savedAt, lastHintTick;
-} netDiag;
+static struct live_net net = {.fd = -1};
 static u32 fps = 30, rate = 800000, configEpoch, configSequence;
 static unsigned qualityTarget;
 static unsigned quality = 60, spare;
@@ -203,13 +194,13 @@ bool live_requested(void)
 	fps = config.fps;
 	rate = config.rate;
 
-	memset(&target, 0, sizeof(target));
-	target.sin_family = AF_INET;
-	automaticHost = config.automatic_host;
-	if (!automaticHost &&
-	    inet_pton(AF_INET, config.host, &target.sin_addr) != 1)
+	memset(&net.target, 0, sizeof(net.target));
+	net.target.sin_family = AF_INET;
+	net.automatic_host = config.automatic_host;
+	if (!net.automatic_host &&
+	    inet_pton(AF_INET, config.host, &net.target.sin_addr) != 1)
 		enabled = false;
-	target.sin_port = htons(config.port);
+	net.target.sin_port = htons(config.port);
 
 	if (!live_config_valid(&config))
 		enabled = false;
@@ -223,7 +214,8 @@ u32 live_fps(void)
 }
 bool live_peer_ready(void)
 {
-	return !stopped() && __atomic_load_n(&mediaReady, __ATOMIC_ACQUIRE);
+	return !stopped() &&
+	       __atomic_load_n(&net.media_ready, __ATOMIC_ACQUIRE);
 }
 bool live_receiver_has_video(void)
 {
@@ -908,43 +900,16 @@ static void audio_pacing_charge(u64 *due, u64 begin, u64 returned, u32 wire,
 
 static void send_audio(u64 *due)
 {
-	live_audio_sender_send(&audio, session, audioEnabled, stopped(), fd,
-			       &target, due, pacing_sleep_until,
+	live_audio_sender_send(&audio, session, audioEnabled, stopped(), net.fd,
+			       &net.target, due, pacing_sleep_until,
 			       audio_pacing_charge);
-}
-
-static void network_report_snapshot(struct live_net_report *snapshot)
-{
-	memset(snapshot, 0, sizeof(*snapshot));
-	snapshot->session = session;
-	snapshot->automatic = automaticHost;
-	snapshot->peer_ready = mediaReady;
-	snapshot->polls = netDiag.polls;
-	snapshot->local_address = localAddress;
-	snapshot->local_mask = localMask;
-	snapshot->last_destination = netDiag.lastDestination;
-	snapshot->peer_address = ntohl(target.sin_addr.s_addr);
-	snapshot->local_port = netDiag.localPort;
-	snapshot->media_port = ntohs(target.sin_port);
-	snapshot->info_result = netDiag.infoResult;
-	snapshot->info_errno = netDiag.infoErrno;
-	snapshot->socket_errno = netDiag.socketErrno;
-	snapshot->bind_errno = netDiag.bindErrno;
-	snapshot->probe_attempts = netDiag.probeAttempts;
-	snapshot->probes_sent = netDiag.probesSent;
-	snapshot->probe_errno = netDiag.sendErrno;
-	snapshot->receive_errno = netDiag.receiveErrno;
-	snapshot->received_datagrams = netDiag.replies;
-	snapshot->accepted_replies = netDiag.accepted;
-	snapshot->invites = netDiag.hints;
-	snapshot->invites_answered = netDiag.hintsAnswered;
 }
 
 static size_t network_report_text(char *text, size_t capacity)
 {
 	struct live_net_report snapshot;
 
-	network_report_snapshot(&snapshot);
+	live_net_snapshot(&net, session, &snapshot);
 	return live_net_report_format(text, capacity, &snapshot);
 }
 
@@ -953,9 +918,9 @@ static void queue_network_report(void)
 {
 	struct live_net_report snapshot;
 
-	network_report_snapshot(&snapshot);
+	live_net_snapshot(&net, session, &snapshot);
 	live_net_report_queue(&snapshot);
-	netDiag.savedAt = svcGetSystemTick();
+	net.diag.saved_at = svcGetSystemTick();
 }
 
 void live_flush_network_report(bool force)
@@ -963,41 +928,17 @@ void live_flush_network_report(bool force)
 	live_net_report_flush(force);
 }
 
-/* A fixed port receives invitations from PCs that can broadcast to the console.
- * If occupied, the first outgoing probe still obtains an ephemeral source port.
- */
-static int open_stream_socket(void)
-{
-	int sock = socket(AF_INET, SOCK_DGRAM, 0);
-	netDiag.socketErrno = sock < 0 ? errno : 0;
-	if (sock < 0)
-		return -1;
-	struct sockaddr_in local = {
-	    .sin_family = AF_INET,
-	    .sin_port = htons(automaticHost ? LIVE_DISCOVERY_PORT : 0)};
-	if (fcntl(sock, F_SETFL, O_NONBLOCK) < 0) {
-		netDiag.socketErrno = errno;
-		close(sock);
-		return -1;
-	}
-	netDiag.bindErrno =
-	    bind(sock, (struct sockaddr *)&local, sizeof local) < 0 ? errno : 0;
-	if (!netDiag.bindErrno)
-		netDiag.localPort = ntohs(local.sin_port);
-	return sock;
-}
-
 static bool send_discovery_probe(const u8 *probe, u32 address, u64 *due)
 {
-	struct sockaddr_in destination = target;
+	struct sockaddr_in destination = net.target;
 	destination.sin_addr.s_addr = htonl(address);
-	netDiag.lastDestination = address;
-	netDiag.probeAttempts++;
-	bool paired = mediaReady && address == discovery.peer;
+	net.diag.last_destination = address;
+	net.diag.probe_attempts++;
+	bool paired = net.media_ready && address == discovery.peer;
 	if (paired && pacingMode)
 		pacing_sleep_until(*due);
 	u64 begin = paired ? svcGetSystemTick() : 0;
-	int sent = sendto(fd, probe, LIVE_DISCOVERY_BYTES, 0,
+	int sent = sendto(net.fd, probe, LIVE_DISCOVERY_BYTES, 0,
 			  (struct sockaddr *)&destination, sizeof destination);
 	if (paired) {
 		u64 returned = svcGetSystemTick();
@@ -1009,16 +950,16 @@ static bool send_discovery_probe(const u8 *probe, u32 address, u64 *due)
 					    returned, 0, SYSCLOCK_ARM11);
 	}
 	if (sent != LIVE_DISCOVERY_BYTES) {
-		netDiag.sendErrno = errno;
+		net.diag.send_errno = errno;
 		return false;
 	}
-	netDiag.probesSent++;
-	netDiag.sendErrno = 0;
-	if (!netDiag.localPort) {
+	net.diag.probes_sent++;
+	net.diag.send_errno = 0;
+	if (!net.diag.local_port) {
 		struct sockaddr_in local = {0};
 		socklen_t size = sizeof local;
-		if (getsockname(fd, (struct sockaddr *)&local, &size) == 0)
-			netDiag.localPort = ntohs(local.sin_port);
+		if (getsockname(net.fd, (struct sockaddr *)&local, &size) == 0)
+			net.diag.local_port = ntohs(local.sin_port);
 	}
 	return true;
 }
@@ -1068,17 +1009,17 @@ static void poll_discovery(u64 now, u64 *due)
 	if (!expired && lastProbeTick && now - lastProbeTick < SYSCLOCK_ARM11)
 		return;
 	lastProbeTick = now;
-	netDiag.polls++;
-	if (fd < 0)
-		fd = open_stream_socket();
+	net.diag.polls++;
+	if (net.fd < 0)
+		live_net_open(&net);
 	/* A live reply on this socket verifies the route. Avoid a synchronous
 	 * SOC network-configuration query on each second of an active stream.
 	 */
-	if (!expired && mediaReady && lastPeerControl &&
+	if (!expired && net.media_ready && lastPeerControl &&
 	    now >= lastPeerControl &&
 	    now - lastPeerControl <
 		(u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11) {
-		if (automaticHost && discovery.peer) {
+		if (net.automatic_host && discovery.peer) {
 			u8 probe[LIVE_DISCOVERY_BYTES];
 			live_discover_invited_probe(&discovery, session, probe);
 			send_discovery_probe(probe, discovery.peer, due);
@@ -1086,55 +1027,56 @@ static void poll_discovery(u64 now, u64 *due)
 		return;
 	}
 	struct in_addr ip = {0}, mask = {0}, broadcast = {0};
-	netDiag.infoResult = SOCU_GetIPInfo(&ip, &mask, &broadcast);
-	netDiag.infoErrno = netDiag.infoResult ? errno : 0;
+	net.diag.info_result = SOCU_GetIPInfo(&ip, &mask, &broadcast);
+	net.diag.info_errno = net.diag.info_result ? errno : 0;
 	if (!ip.s_addr) {
 		long host = gethostid();
 		if (host != -1)
 			ip.s_addr = (u32)host;
 	}
 	u32 address = ntohl(ip.s_addr), netmask = ntohl(mask.s_addr);
-	bool moved = address && localAddress &&
-		     (address != localAddress ||
-		      (netmask && localMask && netmask != localMask));
+	bool moved = address && net.local_address &&
+		     (address != net.local_address ||
+		      (netmask && net.local_mask && netmask != net.local_mask));
 	if (expired || moved) {
-		__atomic_store_n(&mediaReady, false, __ATOMIC_RELEASE);
+		__atomic_store_n(&net.media_ready, false, __ATOMIC_RELEASE);
 		reset_receiver_feedback();
 		discovery.peer = 0;
 		discovery.outstanding = false;
-		if (automaticHost)
-			target.sin_addr.s_addr = 0;
+		if (net.automatic_host)
+			net.target.sin_addr.s_addr = 0;
 		reset_peer_config();
-		if (fd >= 0) {
-			close(fd);
-			fd = -1;
+		if (net.fd >= 0) {
+			live_net_close(&net);
 		}
-		netDiag.localPort = 0;
-		fd = open_stream_socket();
+		net.diag.local_port = 0;
+		live_net_open(&net);
 	}
 	if (address) {
-		if (address != localAddress || netmask)
-			localMask = netmask;
-		localAddress = address;
+		if (address != net.local_address || netmask)
+			net.local_mask = netmask;
+		net.local_address = address;
 	}
-	netDiag.reportedBroadcast = ntohl(broadcast.s_addr);
-	if (!mediaReady && (netDiag.polls == 2 ||
-			    now - netDiag.savedAt >= 5ull * SYSCLOCK_ARM11))
+	net.diag.reported_broadcast = ntohl(broadcast.s_addr);
+	if (!net.media_ready &&
+	    (net.diag.polls == 2 ||
+	     now - net.diag.saved_at >= 5ull * SYSCLOCK_ARM11))
 		queue_network_report();
-	if (fd < 0)
+	if (net.fd < 0)
 		return;
-	if (!automaticHost) {
-		bool usable = live_peer_address(ntohl(target.sin_addr.s_addr),
-						localAddress, localMask);
-		if (!usable && mediaReady)
+	if (!net.automatic_host) {
+		bool usable =
+		    live_peer_address(ntohl(net.target.sin_addr.s_addr),
+				      net.local_address, net.local_mask);
+		if (!usable && net.media_ready)
 			reset_receiver_feedback();
 		if (lastPeerControl &&
 		    (!usable ||
 		     now - lastPeerControl >=
 			 (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11))
 			reset_peer_config();
-		bool wasReady = mediaReady;
-		__atomic_store_n(&mediaReady, usable, __ATOMIC_RELEASE);
+		bool wasReady = net.media_ready;
+		__atomic_store_n(&net.media_ready, usable, __ATOMIC_RELEASE);
 		if (wasReady != usable)
 			queue_network_report();
 		return;
@@ -1148,10 +1090,10 @@ static void poll_discovery(u64 now, u64 *due)
 		/* Routers and SOC implementations differ in handling subnet vs
 		 * limited broadcast. Both probes share one challenge and expose
 		 * no media. */
-		u32 subnet = netDiag.reportedBroadcast;
-		if (!subnet && localAddress && localMask)
-			subnet =
-			    live_broadcast_address(localAddress, localMask);
+		u32 subnet = net.diag.reported_broadcast;
+		if (!subnet && net.local_address && net.local_mask)
+			subnet = live_broadcast_address(net.local_address,
+							net.local_mask);
 		sent = subnet && subnet != UINT32_MAX &&
 		       send_discovery_probe(probe, subnet, due);
 		if (send_discovery_probe(probe, UINT32_MAX, due))
@@ -1162,10 +1104,9 @@ static void poll_discovery(u64 now, u64 *due)
 		/* Even if SOC refuses outbound broadcasts, the fixed listener
 		 * must stay open so a PC invitation can initiate the unicast
 		 * handshake. */
-		if (!discovery.peer && netDiag.bindErrno) {
-			close(fd);
-			fd = -1;
-			netDiag.localPort = 0;
+		if (!discovery.peer && net.diag.bind_errno) {
+			live_net_close(&net);
+			net.diag.local_port = 0;
 		}
 	}
 }
@@ -1174,7 +1115,8 @@ static u64 send_status(u64 *due, const u8 *msg, u32 size)
 {
 	pacing_sleep_until(*due);
 	u64 begin = svcGetSystemTick();
-	sendto(fd, msg, size, 0, (struct sockaddr *)&target, sizeof target);
+	sendto(net.fd, msg, size, 0, (struct sockaddr *)&net.target,
+	       sizeof net.target);
 	pacing_charge(due, begin, svcGetSystemTick(), size + 28, PACKET_STATUS);
 	return begin;
 }
@@ -1183,9 +1125,9 @@ static u64 send_status(u64 *due, const u8 *msg, u32 size)
 static void peer_activity(u64 now)
 {
 	lastPeerControl = now;
-	if (automaticHost)
+	if (net.automatic_host)
 		live_discover_activity(&discovery,
-				       ntohl(target.sin_addr.s_addr), now);
+				       ntohl(net.target.sin_addr.s_addr), now);
 }
 
 static void accept_repair(const u8 *msg, int size, u64 now)
@@ -1218,12 +1160,12 @@ static void poll_frame_feedback(u64 now)
 	lastRepairPoll = now;
 	struct sockaddr_in from;
 	socklen_t size = sizeof from;
-	int n =
-	    recvfrom(fd, deferredControl.bytes, sizeof deferredControl.bytes, 0,
-		     (struct sockaddr *)&from, &size);
+	int n = recvfrom(net.fd, deferredControl.bytes,
+			 sizeof deferredControl.bytes, 0,
+			 (struct sockaddr *)&from, &size);
 	if (n <= 0 || size < sizeof from || from.sin_family != AF_INET ||
-	    from.sin_port != target.sin_port ||
-	    from.sin_addr.s_addr != target.sin_addr.s_addr)
+	    from.sin_port != net.target.sin_port ||
+	    from.sin_addr.s_addr != net.target.sin_addr.s_addr)
 		return;
 	if (n >= 4 && !memcmp(deferredControl.bytes, "R19N", 4))
 		accept_repair(deferredControl.bytes, n, now);
@@ -1336,9 +1278,9 @@ static const struct live_control_ops control_ops = {
 static void control(u64 *due)
 {
 	u64 now = svcGetSystemTick();
-	if (fd < 0)
+	if (net.fd < 0)
 		poll_discovery(now, due);
-	if (fd < 0)
+	if (net.fd < 0)
 		return;
 	if (rowLastAck &&
 	    now - rowLastAck >= (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11) {
@@ -1362,65 +1304,68 @@ static void control(u64 *due)
 				memcpy(msg, deferredControl.bytes, n);
 				deferredControl.size = 0;
 			} else
-				n = recvfrom(fd, msg, sizeof msg, 0,
+				n = recvfrom(net.fd, msg, sizeof msg, 0,
 					     (struct sockaddr *)&from, &size);
 			if (n < 0) {
 				if (errno != EAGAIN && errno != EWOULDBLOCK)
-					netDiag.receiveErrno = errno;
+					net.diag.receive_errno = errno;
 				break;
 			}
 			now = svcGetSystemTick();
-			netDiag.replies++;
+			net.diag.replies++;
 			if (size < sizeof from || from.sin_family != AF_INET ||
-			    from.sin_port != target.sin_port)
+			    from.sin_port != net.target.sin_port)
 				continue;
-			if (automaticHost && !discovery.peer &&
+			if (net.automatic_host && !discovery.peer &&
 			    live_discover_invitation(msg, (size_t)n)) {
 				u32 address = ntohl(from.sin_addr.s_addr);
-				if (!live_reply_address(address, localAddress,
-							localMask) ||
-				    address == netDiag.reportedBroadcast)
+				if (!live_reply_address(address,
+							net.local_address,
+							net.local_mask) ||
+				    address == net.diag.reported_broadcast)
 					continue;
-				netDiag.hints++;
-				if (netDiag.lastHintTick &&
-				    now - netDiag.lastHintTick <
+				net.diag.hints++;
+				if (net.diag.last_hint_tick &&
+				    now - net.diag.last_hint_tick <
 					SYSCLOCK_ARM11 / 5)
 					continue;
-				netDiag.lastHintTick = now;
+				net.diag.last_hint_tick = now;
 				u8 probe[LIVE_DISCOVERY_BYTES];
 				live_discover_invited_probe(&discovery, session,
 							    probe);
 				if (send_discovery_probe(probe, address, due))
-					netDiag.hintsAnswered++;
+					net.diag.hints_answered++;
 				continue;
 			}
 			if (n < 8 || get32(msg + 4) != session)
 				continue;
-			if (automaticHost && n >= 4 &&
+			if (net.automatic_host && n >= 4 &&
 			    !memcmp(msg, "3DLA", 4)) {
 				bool first = !discovery.peer;
 				u32 address = ntohl(from.sin_addr.s_addr);
-				if (live_reply_address(address, localAddress,
-						       localMask) &&
-				    address != netDiag.reportedBroadcast &&
+				if (live_reply_address(address,
+						       net.local_address,
+						       net.local_mask) &&
+				    address != net.diag.reported_broadcast &&
 				    live_discover_ack(&discovery, address,
 						      session, msg, (size_t)n,
 						      now)) {
-					netDiag.accepted++;
+					net.diag.accepted++;
 					lastPeerControl = now;
 					if (first) {
-						target.sin_addr = from.sin_addr;
+						net.target.sin_addr =
+						    from.sin_addr;
 						lastStatusTick = 0;
 						__atomic_store_n(
-						    &mediaReady, true,
+						    &net.media_ready, true,
 						    __ATOMIC_RELEASE);
 						queue_network_report();
 					}
 				}
 				continue;
 			}
-			if (!mediaReady ||
-			    from.sin_addr.s_addr != target.sin_addr.s_addr)
+			if (!net.media_ready ||
+			    from.sin_addr.s_addr != net.target.sin_addr.s_addr)
 				continue;
 			live_control_handle(msg, n, now, screenMask,
 					    combinedFec, qualityTarget,
@@ -1438,7 +1383,7 @@ static void control(u64 *due)
 	 * the challenge or closing the only socket that can receive them. */
 	poll_discovery(svcGetSystemTick(), due);
 	now = svcGetSystemTick();
-	if (!mediaReady || now - lastStatusTick < SYSCLOCK_ARM11)
+	if (!net.media_ready || now - lastStatusTick < SYSCLOCK_ARM11)
 		return;
 	struct live_status_main status = {
 	    .session = session,
@@ -1552,8 +1497,8 @@ static void control(u64 *due)
 		u64 call = svcGetSystemTick();
 		put32(marker + 16, (u32)call);
 		put32(marker + 20, (u32)(call >> 32));
-		sendto(fd, marker, sizeof marker, 0, (struct sockaddr *)&target,
-		       sizeof target);
+		sendto(net.fd, marker, sizeof marker, 0,
+		       (struct sockaddr *)&net.target, sizeof net.target);
 		pacing_charge(due, call, svcGetSystemTick(), sizeof marker + 28,
 			      PACKET_STATUS);
 	}
@@ -1595,8 +1540,8 @@ static bool send_repair(u64 *totalDue, u64 now, u64 nextFreshDue)
 	put32(packet + 28, f->fps);
 	memcpy(packet + 32, sendArena + f->offset + off, len);
 	u64 begin = svcGetSystemTick();
-	int sent = sendto(fd, packet, 32 + len, 0, (struct sockaddr *)&target,
-			  sizeof target);
+	int sent = sendto(net.fd, packet, 32 + len, 0,
+			  (struct sockaddr *)&net.target, sizeof net.target);
 	u64 returned = svcGetSystemTick();
 	pacing_charge(totalDue, begin, returned, wire, PACKET_REPAIR);
 	if (!f->next && sent == (int)(32 + len)) {
@@ -1662,8 +1607,8 @@ static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
 	put32(packet + 28, fps);
 	memcpy(packet + header, data, len);
 	u64 begin = svcGetSystemTick();
-	int sent = sendto(fd, packet, len + header, 0,
-			  (struct sockaddr *)&target, sizeof target);
+	int sent = sendto(net.fd, packet, len + header, 0,
+			  (struct sockaddr *)&net.target, sizeof net.target);
 	u64 returned = svcGetSystemTick();
 	u32 us = (u32)((returned - begin) * 1000000 / SYSCLOCK_ARM11);
 	live_timing_packet(begin, returned, sent == (int)(len + header));
@@ -1698,7 +1643,7 @@ static void sender(void *unused)
 	u32 lastSentSeq = 0;
 	while (!stopped()) {
 		control(&pacing.totalDue);
-		if (!mediaReady || capture_paused()) {
+		if (!net.media_ready || capture_paused()) {
 			svcSleepThread(10000000);
 			continue;
 		}
@@ -2003,9 +1948,9 @@ Result live_start(void *(*allocate)(u32 bytes))
 	discovery = (LiveDiscovery){.challenge = (u32)(started >> 16)};
 	reset_receiver_feedback();
 	lastProbeTick = lastPeerControl = 0;
-	localAddress = localMask = 0;
-	memset(&netDiag, 0, sizeof netDiag);
-	__atomic_store_n(&mediaReady, false, __ATOMIC_RELEASE);
+	net.local_address = net.local_mask = 0;
+	memset(&net.diag, 0, sizeof(net.diag));
+	__atomic_store_n(&net.media_ready, false, __ATOMIC_RELEASE);
 	live_net_report_init();
 	queue_network_report();
 	live_flush_network_report(true);
@@ -2084,10 +2029,7 @@ void live_stop(void)
 #ifdef LIVE_FRAME_TIMING
 	bool timingSaved = live_timing_export(session, started);
 #endif
-	if (fd >= 0) {
-		close(fd);
-		fd = -1;
-	}
+	live_net_close(&net);
 	if (socReady) {
 		socExit();
 		socReady = false;
