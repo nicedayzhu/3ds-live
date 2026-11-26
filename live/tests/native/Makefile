@@ -6,8 +6,9 @@ CFLAGS += -O2 -std=c11 -Wall -Wextra -Werror
 TESTS := test_live test_pacing test_rate test_pair test_repair_cache test_pending_queue test_jpeg_rows test_row_compression test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_live_config test_live_net_report test_live_control test_live_stats test_live_status test_live_repair_packet test_module_install test_launcher_status test_launcher_language
 BINS := $(addprefix $(OUT)/,$(TESTS))
 
-.PHONY: check
-check: $(BINS)
+.PHONY: all check
+all: $(BINS)
+check: all
 	@set -e; for test in $(BINS); do "$$test"; done
 
 $(OUT):
