@@ -61,7 +61,7 @@ jobs:
 
   build-windows:
     name: Build Windows player
-    runs-on: windows-latest
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: jurplel/install-qt-action@v4
@@ -86,8 +86,18 @@ jobs:
           "LIVE_MODELS=$($model.Directory.FullName)" >> $env:GITHUB_ENV
       - name: Build and deploy
         shell: pwsh
+        env:
+          TENSORRT_ROOT: ${{ vars.TENSORRT_ROOT }}
+          ACCELERATION_DIR: ${{ vars.ACCELERATION_DIR }}
         run: |
-          .\live\qt\build.ps1 -QtSdk $env:QT_ROOT_DIR -SkipTests -Models $env:LIVE_MODELS
+          $args = @('-QtSdk', $env:QT_ROOT_DIR, '-SkipTests', '-Models', $env:LIVE_MODELS)
+          if ($env:TENSORRT_ROOT -or $env:ACCELERATION_DIR) {
+            if (!$env:TENSORRT_ROOT -or !$env:ACCELERATION_DIR) {
+              throw 'Set both TENSORRT_ROOT and ACCELERATION_DIR, or neither'
+            }
+            $args += @('-TensorRT', '-AccelerationDirectory', $env:ACCELERATION_DIR)
+          }
+          .\live\qt\build.ps1 @args
       - uses: actions/upload-artifact@v4
         with:
           name: windows
