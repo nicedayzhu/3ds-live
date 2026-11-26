@@ -50,3 +50,15 @@ Settings → Secrets and variables → Actions → Variables → MODELS_TAG
 普通应用版本升级不用动它。
 
 更长期可以把模型放到独立的 `ci-models` Release，避免依赖应用 Release 的 Windows 资产。
+
+
+## 本地 TensorRT 测试构建
+
+CI 发布的是 DirectML 标准包；本地测试构建固定走 TensorRT：
+
+```powershell
+pwsh -File scripts/build-pc-tensorrt.ps1 -SkipTests
+```
+
+产物在 `dist/Windows`，包含 `runtime/acceleration` 的 NVIDIA runtime 和 plan。
+需要完整测试时去掉 `-SkipTests`。
