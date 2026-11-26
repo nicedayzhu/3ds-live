@@ -562,6 +562,209 @@ static void configure_stream(u32 hz, u32 bps, bool fec, unsigned targetQ)
 	/* A new quality/rate invalidates the reused bottom JPEG. */
 }
 
+struct pair_encode {
+	u32 seq;
+	u32 stamp;
+	u32 epoch;
+	u32 initial_rate;
+	u32 budget;
+	u32 target_bytes;
+	u32 job_rate;
+	u32 job_fps;
+	unsigned target_q;
+	unsigned q;
+	bool combined;
+	bool use_rows;
+	bool bottom_rows;
+	bool use_r20;
+	RowAnchor *base;
+	RowAnchor *probe;
+	u64 next;
+};
+
+static void encode_single_screen(u32 seq, u32 stamp, u32 epoch, u32 budget,
+				 unsigned q)
+{
+	const unsigned sc = (screenMask & 1) ? 0 : 1;
+	size_t packed;
+	u32 wire;
+	LivePendingPair incoming;
+	u32 bytes;
+	unsigned slot;
+	LivePendingPair *pair;
+
+	if (!run_single_job(1, q, sc))
+		return;
+	live_timing_encoded();
+	packed = compactJpeg
+		     ? live_jpeg_wire_pack(encoded[sc], MAX_JPEG, encoded[sc],
+					   jobSize[sc], sc ? 320 : 400, q)
+		     : 0;
+	wire = packed ? (u32)packed : jobSize[sc];
+	if (!jobSize[sc] || wire > budget) {
+		oversize++;
+		return;
+	}
+	incoming = (LivePendingPair){
+	    .length = {sc == 0 ? wire : 0, sc == 1 ? wire : 0},
+	    .seq = seq,
+	    .stamp = stamp,
+	    .epoch = epoch,
+	    .r20 = false};
+	bytes = live_pending_bytes(&incoming);
+	while (!live_pending_fits(&pending, bytes, sizeof pendingBytes)) {
+		discard_pending(pending.head, TIMING_REPLACED);
+		replaced++;
+	}
+	slot = live_pending_append(&pending, pendingBytes, sizeof pendingBytes,
+				   incoming);
+	pair = &pending.slots[slot];
+	memcpy(pendingBytes + pair->offset, encoded[sc], wire);
+}
+
+static void encode_pair(struct pair_encode *e)
+{
+	unsigned q = e->q;
+	u32 budget = e->budget;
+	u32 target_bytes = e->target_bytes;
+	RowPairPlan plan;
+
+	if (!run_pair_job(1, q))
+		return;
+	live_timing_encoded();
+	/* Bounded requantization: reuse DCT, at most 3 entropy passes. */
+	for (unsigned retry = 0;; retry++) {
+		u32 current_rate;
+
+		LightLock_Lock(&lock);
+		current_rate = rate;
+		LightLock_Unlock(&lock);
+		if (current_rate != e->job_rate) {
+			e->job_rate = current_rate;
+			budget = pair_payload_budget(e->job_rate, e->job_fps,
+						     e->combined, e->target_q);
+			target_bytes = budget * payloadControl.percent / 100;
+		}
+		measure_pair(&plan, q, e->combined || e->target_q, e->use_rows,
+			     e->base, e->probe, e->bottom_rows);
+		if (e->use_r20 && plan.valid)
+			compress_bottom(&plan, e->base, e->next);
+		u32 total = plan.wire[0] + plan.wire[1];
+		if (jobSize[0] && jobSize[1] && total <= budget)
+			break;
+		unsigned next_q =
+		    live_retry_quality(e->target_q, q, retry, total, budget);
+
+		if (next_q == q || capture_paused())
+			break;
+		retries++;
+		q = next_q;
+		if (!run_pair_job(2, q))
+			break;
+		live_timing_encoded();
+	}
+	if (stopped())
+		return;
+	u32 payload_total = plan.wire[0] + plan.wire[1];
+	bool fits = jobSize[0] && jobSize[1] && payload_total <= budget;
+
+	for (unsigned i = 0; i < 2; i++) {
+		attempts[i]++;
+		sumUs[i] += jobUs[i];
+		changedMcus[i] += jobChanged[i];
+		if (jobUs[i] > maxUs[i])
+			maxUs[i] = jobUs[i];
+		__atomic_store_n(&lastEncodeUs[i], jobUs[i], __ATOMIC_RELAXED);
+		if (fits) {
+			__atomic_add_fetch(&jpegFrames[i], 1, __ATOMIC_RELAXED);
+			if (jobSize[i] > maxBytes[i])
+				maxBytes[i] = jobSize[i];
+		}
+	}
+	quality = q;
+	if (!fits) {
+		if (e->target_q) {
+			if (!jobSize[0] || !jobSize[1])
+				manualRenderFailures++;
+			else
+				manualWireDrops++;
+		}
+		live_timing_drop_encoded(TIMING_OVERSIZE);
+		oversize++;
+		spare = 0;
+		return;
+	}
+	if (!e->target_q) {
+		if (payload_total > target_bytes) {
+			quality =
+			    live_lower_quality(q, payload_total, target_bytes);
+			spare = 0;
+		} else if (payload_total < target_bytes * 9 / 10) {
+			if (++spare >= 4) {
+				quality = quality < 83 ? quality + 2 : 85;
+				spare = 0;
+			}
+		} else {
+			spare = 0;
+		}
+	}
+	LightLock_Lock(&lock);
+	u32 current_budget =
+	    pair_payload_budget(rate, e->job_fps, e->combined, e->target_q);
+
+	if (plan.bottomCompressed && !r20_recent(svcGetSystemTick())) {
+		plan.bottomCompressed = NULL;
+		plan.wire[1] = plan.bottomDeltaBytes;
+		payload_total = plan.wire[0] + plan.wire[1];
+	}
+	if (e->epoch == configEpoch && (!e->base || e->base == rowBase) &&
+	    payload_total <= current_budget &&
+	    payload_total <= sizeof pendingBytes) {
+		if (e->initial_rate != rate)
+			rateEncodingKept++;
+		u64 now = svcGetSystemTick();
+		bool key = e->use_rows && needs_key(&plan, now, e->seq,
+						    e->stamp, current_budget);
+		LivePendingPair incoming = {
+		    .length = {key ? plan.compact[0] : plan.wire[0],
+			       key ? plan.compact[1] : plan.wire[1]},
+		    .seq = e->seq,
+		    .stamp = e->stamp,
+		    .epoch = e->epoch,
+		    .r20 = !key && plan.bottomCompressed};
+		u32 bytes = live_pending_bytes(&incoming);
+		bool overflow =
+		    !live_pending_fits(&pending, bytes, sizeof pendingBytes);
+
+		while (
+		    !live_pending_fits(&pending, bytes, sizeof pendingBytes)) {
+			discard_pending(pending.head, TIMING_REPLACED);
+			replaced++;
+		}
+		live_payload_observe(&payloadControl, e->job_fps, overflow);
+		unsigned slot = live_pending_append(
+		    &pending, pendingBytes, sizeof pendingBytes, incoming);
+		LivePendingPair *pair = &pending.slots[slot];
+
+		if (e->use_rows) {
+			publish_rows(&plan, e->base, pair, key, now);
+		} else {
+			u8 *out = pendingBytes + pair->offset;
+
+			for (unsigned i = 0; i < 2; i++) {
+				pair->length[i] =
+				    pack_panel(i, q, out, pair->length[i]);
+				out += pair->length[i];
+			}
+		}
+		pair->queued = svcGetSystemTick();
+		live_timing_publish(slot, pair->queued);
+	} else {
+		live_timing_drop_encoded(TIMING_RECONFIGURED);
+	}
+	LightLock_Unlock(&lock);
+}
+
 static void encoder(void *arg)
 {
 	if ((uintptr_t)arg) {
@@ -667,174 +870,29 @@ static void encoder(void *arg)
 		unsigned q = targetQ ? targetQ : quality;
 		live_timing_begin(seq, stamp);
 		if (screenMask != 3) {
-			const unsigned sc = (screenMask & 1) ? 0 : 1;
-			if (!run_single_job(1, q, sc))
-				break;
-			live_timing_encoded();
-			const size_t packed =
-			    compactJpeg
-				? live_jpeg_wire_pack(encoded[sc], MAX_JPEG,
-						      encoded[sc], jobSize[sc],
-						      sc ? 320 : 400, q)
-				: 0;
-			const u32 wire = packed ? (u32)packed : jobSize[sc];
-			if (!jobSize[sc] || wire > budget) {
-				oversize++;
-				continue;
-			}
-			LivePendingPair incoming = {
-			    .length = {sc == 0 ? wire : 0, sc == 1 ? wire : 0},
-			    .seq = seq,
-			    .stamp = stamp,
-			    .epoch = epoch,
-			    .r20 = false};
-			u32 bytes = live_pending_bytes(&incoming);
-			while (!live_pending_fits(&pending, bytes,
-						  sizeof pendingBytes)) {
-				discard_pending(pending.head, TIMING_REPLACED);
-				replaced++;
-			}
-			unsigned slot =
-			    live_pending_append(&pending, pendingBytes,
-						sizeof pendingBytes, incoming);
-			LivePendingPair *pair = &pending.slots[slot];
-			memcpy(pendingBytes + pair->offset, encoded[sc], wire);
+			encode_single_screen(seq, stamp, epoch, budget, q);
 			continue;
 		}
-		if (!run_pair_job(1, q))
-			break;
-		live_timing_encoded();
-		RowPairPlan plan;
-		/* Bounded requantization: reuse DCT, at most 3 entropy passes.
-		 */
-		for (unsigned retry = 0;; retry++) {
-			/* A rate cut may arrive during the DCT. Reuse it for
-			 * the normal bounded entropy retries instead of
-			 * abandoning the frame. */
-			LightLock_Lock(&lock);
-			u32 currentRate = rate;
-			LightLock_Unlock(&lock);
-			if (currentRate != jobRate) {
-				jobRate = currentRate;
-				budget = pair_payload_budget(jobRate, jobFps,
-							     combined, targetQ);
-				targetBytes =
-				    budget * payloadControl.percent / 100;
-			}
-			measure_pair(&plan, q, combined || targetQ, useRows,
-				     base, probe, bottomRows);
-			if (useR20 && plan.valid)
-				compress_bottom(&plan, base, next);
-			u32 total = plan.wire[0] + plan.wire[1];
-			if (jobSize[0] && jobSize[1] && total <= budget)
-				break;
-			unsigned nextQ = live_retry_quality(targetQ, q, retry,
-							    total, budget);
-			if (nextQ == q || capture_paused())
-				break;
-			retries++;
-			q = nextQ;
-			if (!run_pair_job(2, q))
-				break;
-			live_timing_encoded();
-		}
-		if (stopped())
-			break;
-		u32 payloadTotal = plan.wire[0] + plan.wire[1];
-		bool fits = jobSize[0] && jobSize[1] && payloadTotal <= budget;
-		for (unsigned i = 0; i < 2; i++) {
-			attempts[i]++;
-			sumUs[i] += jobUs[i];
-			changedMcus[i] += jobChanged[i];
-			if (jobUs[i] > maxUs[i])
-				maxUs[i] = jobUs[i];
-			__atomic_store_n(&lastEncodeUs[i], jobUs[i],
-					 __ATOMIC_RELAXED);
-			if (fits) {
-				__atomic_add_fetch(&jpegFrames[i], 1,
-						   __ATOMIC_RELAXED);
-				if (jobSize[i] > maxBytes[i])
-					maxBytes[i] = jobSize[i];
-			}
-		}
-		quality = q;
-		if (!fits) {
-			if (targetQ) {
-				if (!jobSize[0] || !jobSize[1])
-					manualRenderFailures++;
-				else
-					manualWireDrops++;
-			}
-			live_timing_drop_encoded(TIMING_OVERSIZE);
-			oversize++;
-			spare = 0;
-			continue;
-		}
-		if (!targetQ) {
-			if (payloadTotal > targetBytes) {
-				quality = live_lower_quality(q, payloadTotal,
-							     targetBytes);
-				spare = 0;
-			} else if (payloadTotal < targetBytes * 9 / 10) {
-				if (++spare >= 4) {
-					quality =
-					    quality < 83 ? quality + 2 : 85;
-					spare = 0;
-				}
-			} else
-				spare = 0;
-		}
-		LightLock_Lock(&lock);
-		u32 currentBudget =
-		    pair_payload_budget(rate, jobFps, combined, targetQ);
-		if (plan.bottomCompressed && !r20_recent(svcGetSystemTick())) {
-			plan.bottomCompressed = NULL;
-			plan.wire[1] = plan.bottomDeltaBytes;
-			payloadTotal = plan.wire[0] + plan.wire[1];
-		}
-		if (epoch == configEpoch && (!base || base == rowBase) &&
-		    payloadTotal <= currentBudget &&
-		    payloadTotal <= sizeof pendingBytes) {
-			if (initialRate != rate)
-				rateEncodingKept++;
-			u64 now = svcGetSystemTick();
-			bool key = useRows && needs_key(&plan, now, seq, stamp,
-							currentBudget);
-			LivePendingPair incoming = {
-			    .length = {key ? plan.compact[0] : plan.wire[0],
-				       key ? plan.compact[1] : plan.wire[1]},
-			    .seq = seq,
-			    .stamp = stamp,
-			    .epoch = epoch,
-			    .r20 = !key && plan.bottomCompressed};
-			u32 bytes = live_pending_bytes(&incoming);
-			bool overflow = !live_pending_fits(&pending, bytes,
-							   sizeof pendingBytes);
-			while (!live_pending_fits(&pending, bytes,
-						  sizeof pendingBytes)) {
-				discard_pending(pending.head, TIMING_REPLACED);
-				replaced++;
-			}
-			live_payload_observe(&payloadControl, jobFps, overflow);
-			unsigned slot =
-			    live_pending_append(&pending, pendingBytes,
-						sizeof pendingBytes, incoming);
-			LivePendingPair *pair = &pending.slots[slot];
-			if (useRows)
-				publish_rows(&plan, base, pair, key, now);
-			else {
-				u8 *out = pendingBytes + pair->offset;
-				for (unsigned i = 0; i < 2; i++) {
-					pair->length[i] = pack_panel(
-					    i, q, out, pair->length[i]);
-					out += pair->length[i];
-				}
-			}
-			pair->queued = svcGetSystemTick();
-			live_timing_publish(slot, pair->queued);
-		} else
-			live_timing_drop_encoded(TIMING_RECONFIGURED);
-		LightLock_Unlock(&lock);
+		struct pair_encode pair = {
+		    .seq = seq,
+		    .stamp = stamp,
+		    .epoch = epoch,
+		    .initial_rate = initialRate,
+		    .budget = budget,
+		    .target_bytes = targetBytes,
+		    .target_q = targetQ,
+		    .q = q,
+		    .job_rate = jobRate,
+		    .job_fps = jobFps,
+		    .combined = combined,
+		    .use_rows = useRows,
+		    .bottom_rows = bottomRows,
+		    .use_r20 = useR20,
+		    .base = base,
+		    .probe = probe,
+		    .next = next,
+		};
+		encode_pair(&pair);
 	}
 }
 static void pacing_sleep_until(u64 due)
