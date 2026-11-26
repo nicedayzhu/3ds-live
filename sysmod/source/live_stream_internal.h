@@ -167,5 +167,9 @@ void pacing_sleep_until(u64 due);
 void pacing_charge(u64 *due, u64 begin, u64 returned, u32 wire,
 		   enum LivePacketKind kind);
 void sender(void *arg);
+void queue_network_report(void);
+void reset_receiver_feedback(void);
+void reset_peer_config(void);
+void row_peer(bool enable, bool forget);
 
 #endif /* LIVE_STREAM_INTERNAL_H */
