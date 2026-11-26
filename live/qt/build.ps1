@@ -7,7 +7,8 @@ param(
     [string]$OutputDirectory,
     [string]$AccelerationDirectory,
     [switch]$TensorRT,
-    [switch]$Zip
+    [switch]$Zip,
+    [switch]$SkipTests
 )
 $ErrorActionPreference = 'Stop'
 $liveRoot = Split-Path -Parent $PSScriptRoot
@@ -175,7 +176,8 @@ try {
     if (!$env:QT_QPA_FONTDIR) { $env:QT_QPA_FONTDIR = Join-Path $env:SystemRoot 'Fonts' }
     $env:TEMP = $env:TMP = Join-Path $build 'test-temp'
     [void][IO.Directory]::CreateDirectory($env:TEMP)
-    Invoke-Checked (Join-Path (Split-Path $cmake) 'ctest.exe') @('--test-dir',$build,'-C','Release','--output-on-failure')
+    if (!$SkipTests)
+        Invoke-Checked (Join-Path (Split-Path $cmake) 'ctest.exe') @('--test-dir',$build,'-C','Release','--output-on-failure')
 } finally {
     $env:PATH, $env:QT_PLUGIN_PATH = $previousPath, $previousPlugins
     $env:QT_QPA_PLATFORM, $env:QT_QPA_FONTDIR = $previousPlatform, $previousFonts

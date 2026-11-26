@@ -1,0 +1,222 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SEED_TAG: v0.1.13
+
+jobs:
+  build-3ds:
+    name: Build 3DS package
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libctru and tools
+        run: |
+          dkp-pacman -Syu --noconfirm
+          dkp-pacman -S --noconfirm 3ds-dev
+      - name: Build
+        run: |
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITARM=$DEVKITPRO/devkitARM
+          export PATH=$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH
+          make -C sysmod LIVE_FRAME_TIMING=0
+          make -C app
+      - name: Stage
+        run: |
+          mkdir -p dist/SD/3ds/3ds-live dist/SD/luma/sysmodules
+          cp app/3ds-live.3dsx dist/3ds-live.3dsx
+          cp app/build/3ds-live.cia dist/3ds-live.cia
+          cp app/3ds-live.3dsx dist/SD/3ds/3ds-live/3ds-live.3dsx
+          cp live/config/live.ini.example dist/SD/3ds/3ds-live/live.ini.example
+          cp sysmod/3dslive.cxi dist/SD/luma/sysmodules/0004013000F1D402.cxi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 3ds
+          path: dist
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows player
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Fetch model assets from the seed release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          New-Item -ItemType Directory -Force seed | Out-Null
+          gh release download "$env:SEED_TAG" --pattern "*Windows-x64-New3DS.zip" --dir seed --clobber
+          Get-ChildItem seed -Filter '*.zip' | Select-Object -First 1 |
+            ForEach-Object { Expand-Archive $_.FullName seed/extracted -Force }
+          $model = Get-ChildItem seed/extracted -Recurse -Filter fbcnn.onnx |
+            Select-Object -First 1
+          if (!$model) { throw 'Seed release has no fbcnn.onnx model' }
+          "LIVE_MODELS=$($model.Directory.FullName)" >> $env:GITHUB_ENV
+      - name: Build and deploy
+        shell: pwsh
+        run: |
+          .\live\qt\build.ps1 -QtSdk $env:QT_ROOT_DIR -SkipTests -Models $env:LIVE_MODELS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Windows
+          if-no-files-found: error
+
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build
+        working-directory: android
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build apk --release --target-platform android-arm64 \
+            --dart-define=APP_VERSION="$(cat ../VERSION)"
+          mkdir -p ../dist
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "../dist/3DS-Live-$(cat ../VERSION)-Android-arm64.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  bundle:
+    name: Assemble release bundle
+    runs-on: windows-latest
+    needs: [build-3ds, build-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: 3ds
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: dist/Windows
+      - name: Package Windows + SD + CIA
+        shell: pwsh
+        run: |
+          .\scripts\package.ps1
+          $version = (Get-Content VERSION -Raw).Trim()
+          $zip = "dist/3DS-Live-$version-SD.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path 'dist/SD/3ds','dist/SD/luma' -DestinationPath $zip -CompressionLevel Optimal
+          Set-Content "$zip.sha256" "$((Get-FileHash $zip).Hash.ToLowerInvariant())  3DS-Live-$version-SD.zip" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: |
+            dist/3DS-Live-*.zip
+            dist/*.sha256
+            dist/3ds-live.3dsx
+            dist/3ds-live.cia
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [bundle, build-android]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: android
+          path: release
+      - name: Prepare checksums and notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" = "$(tr -d '[:space:]' < VERSION)"
+          cd release
+          sha256sum 3DS-Live-*-Windows-x64-New3DS.zip \
+                    3DS-Live-*-SD.zip \
+                    3DS-Live-*-Android-arm64.apk \
+                    3ds-live.3dsx 3ds-live.cia > "checksums-$version.txt"
+          cat > notes.md <<EOF
+          Windows、Android 与掌机端同步发布 ${version}。
+
+          ## 亮点
+
+          - Android arm64 接收端：自动发现、双屏/单屏显示、音量与诊断。
+          - 掌机启动器显示版本号，连接文案统一为“接收端”。
+          - 修复掌机发送线程在等待接收端时提前退出、导致一直停留在“等待连接”的问题。
+          - PC 端“帮助 → 关于 3DS Live”显示版本并检查 GitHub 新版本；Android 端使用右侧设置抽屉、深浅色切换与更新横幅。
+          - 协议与 0.1.12 兼容；同一时刻只支持一个接收端。
+
+          ## 安装
+
+          1. 解压 \`3DS-Live-${version}-Windows-x64-New3DS.zip\`，双击 \`Windows\\3DS-Live.exe\`。
+          2. 掌机端将 \`3ds-live.3dsx\` 放到 \`/3ds/3ds-live/\`，或安装 \`3ds-live.cia\`。
+          3. 在 Luma3DS 配置中勾选 **Enable loading external FIRMs and modules**，打开 **3DS Live** 后按 **R + SELECT**。
+          4. Android 安装 \`3DS-Live-${version}-Android-arm64.apk\`，与掌机连接同一局域网；手机和 PC 不要同时接收。
+
+          ## 校验
+
+          \`\`\`text
+          $(cat "checksums-$version.txt")
+          \`\`\`
+
+          MIT 许可；详见 [INSTALL.md](https://github.com/nicedayzhu/3ds-live/blob/main/INSTALL.md) 和包内 licenses。
+          EOF
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+            gh release edit "$tag" --title "3DS Live ${tag#v}" --notes-file release/notes.md
+          else
+            gh release create "$tag" \
+              --title "3DS Live ${tag#v}" \
+              --notes-file release/notes.md \
+              --verify-tag \
+              release/3DS-Live-*-Windows-x64-New3DS.zip \
+              release/3DS-Live-*-Windows-x64-New3DS.zip.sha256 \
+              release/3DS-Live-*-SD.zip \
+              release/3DS-Live-*-SD.zip.sha256 \
+              release/3DS-Live-*-Android-arm64.apk \
+              release/3ds-live.3dsx \
+              release/3ds-live.cia \
+              release/checksums-*.txt
+          fi
