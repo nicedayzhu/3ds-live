@@ -1525,6 +1525,93 @@ struct tx_frame {
 	u8 *sending[2];
 };
 
+static void sender_purge_pending(u64 now)
+{
+	while (pending.count) {
+		const LivePendingPair *head = &pending.slots[pending.head];
+
+		if (head->epoch != configEpoch ||
+		    (head->r20 && !live_r20_recent(&r20, now))) {
+			discard_pending(pending.head, TIMING_RECONFIGURED);
+		} else if (live_pending_expired(head, now, SYSCLOCK_ARM11,
+						fps)) {
+			discard_pending(pending.head, TIMING_TOO_OLD);
+			expired++;
+		} else {
+			break;
+		}
+	}
+}
+
+/* Called with the pair lock held. */
+static bool sender_select_key(struct tx_frame *tx, u64 now)
+{
+	bool selective =
+	    repairPeerAt &&
+	    now - repairPeerAt < (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11;
+	bool send_key =
+	    rowCandidate &&
+	    (selective ? (rowSends == 0 && rowCandidate->seq == tx->seq)
+		       : (rowSends < 3 &&
+			  (u32)(tx->seq - rowCandidate->seq) < 0x80000000u));
+
+	if (send_key &&
+	    (svcGetSystemTick() - rowLastKey > SYSCLOCK_ARM11 / 4 ||
+	     rowCandidate->length[0] + rowCandidate->length[1] >
+		 pair_payload_budget(rate, fps, combinedFec, qualityTarget))) {
+		send_key = false;
+		rowSends = 3;
+	}
+	if (send_key) {
+		tx->seq = rowCandidate->seq;
+		tx->stamp = rowCandidate->stamp;
+		tx->repeat = rowSends++;
+		if (tx->repeat)
+			rowRepeats++;
+	}
+	return send_key;
+}
+
+/* Called with the pair lock held. */
+static void sender_copy_panels(struct tx_frame *tx, const LivePendingPair *pair,
+			       bool send_key)
+{
+	static LiveRepairFrame single_frame;
+	u64 reserved, until;
+
+	for (unsigned sc = 0; sc < 2; sc++)
+		tx->sizes[sc] =
+		    send_key ? rowCandidate->length[sc] : pair->length[sc];
+	reserved = svcGetSystemTick();
+	until = reserved + (u64)SYSCLOCK_ARM11 * LIVE_REPAIR_HISTORY_MS / 1000;
+	if (tx->sizes[0] && tx->sizes[1]) {
+		tx->cached = live_repair_reserve(
+		    &repairHistory, sizeof sendArena, tx->sizes[0],
+		    tx->sizes[1], tx->seq, tx->stamp, fps, reserved, until);
+	} else {
+		/* A single-screen stream has no second panel, so it cannot
+		 * share the two-panel repair arena; send it directly. */
+		single_frame = (LiveRepairFrame){0};
+		single_frame.top = tx->sizes[0];
+		single_frame.bottom = tx->sizes[1];
+		tx->cached = &single_frame;
+	}
+	if (tx->cached) {
+		tx->sending[0] =
+		    sendArena +
+		    (tx->sizes[0] && tx->sizes[1] ? tx->cached->offset : 0);
+		tx->sending[1] = tx->sending[0] + tx->sizes[0];
+	}
+	for (unsigned sc = 0; tx->cached && sc < 2; sc++) {
+		const u8 *panel =
+		    pendingBytes + pair->offset + (sc ? pair->length[0] : 0);
+
+		memcpy(tx->sending[sc],
+		       send_key ? row_anchor_panel(rowCandidate, sc) : panel,
+		       tx->sizes[sc]);
+	}
+}
+
 static bool sender_prepare(struct tx_frame *tx)
 {
 	bool ready;
@@ -1533,97 +1620,24 @@ static bool sender_prepare(struct tx_frame *tx)
 	memset(tx, 0, sizeof(*tx));
 	LightLock_Lock(&lock);
 	now = svcGetSystemTick();
-	while (pending.count) {
-		const LivePendingPair *head = &pending.slots[pending.head];
-
-		if (head->epoch != configEpoch ||
-		    (head->r20 && !live_r20_recent(&r20, now)))
-			discard_pending(pending.head, TIMING_RECONFIGURED);
-		else if (live_pending_expired(head, now, SYSCLOCK_ARM11, fps)) {
-			discard_pending(pending.head, TIMING_TOO_OLD);
-			expired++;
-		} else {
-			break;
-		}
-	}
+	sender_purge_pending(now);
 	ready = pending.count != 0;
 	if (ready) {
 		unsigned slot = pending.head;
 		const LivePendingPair *pair = &pending.slots[slot];
-		bool selective;
 		bool send_key;
-		u64 reserved, until;
-		static LiveRepairFrame single_frame;
 
 		tx->seq = pair->seq;
 		tx->stamp = pair->stamp;
 		tx->queued = pair->queued;
-		selective = repairPeerAt &&
-			    now - repairPeerAt <
-				(u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11;
-		send_key =
-		    rowCandidate &&
-		    (selective
-			 ? (rowSends == 0 && rowCandidate->seq == tx->seq)
-			 : rowSends < 3 && (u32)(tx->seq - rowCandidate->seq) <
-					       0x80000000u);
-		if (send_key &&
-		    (svcGetSystemTick() - rowLastKey > SYSCLOCK_ARM11 / 4 ||
-		     rowCandidate->length[0] + rowCandidate->length[1] >
-			 pair_payload_budget(rate, fps, combinedFec,
-					     qualityTarget))) {
-			send_key = false;
-			rowSends = 3;
-		}
-		if (send_key) {
-			tx->seq = rowCandidate->seq;
-			tx->stamp = rowCandidate->stamp;
-			tx->repeat = rowSends++;
-			if (tx->repeat)
-				rowRepeats++;
-		}
-		if (tx->seq == pair->seq)
+		send_key = sender_select_key(tx, now);
+		if (tx->seq == pair->seq) {
 			live_timing_claim(slot);
-		else {
+		} else {
 			live_timing_drop_pending(slot, TIMING_REPLACED);
 			replaced++;
 		}
-		for (unsigned sc = 0; sc < 2; sc++)
-			tx->sizes[sc] = send_key ? rowCandidate->length[sc]
-						 : pair->length[sc];
-		reserved = svcGetSystemTick();
-		until = reserved +
-			(u64)SYSCLOCK_ARM11 * LIVE_REPAIR_HISTORY_MS / 1000;
-		if (tx->sizes[0] && tx->sizes[1]) {
-			tx->cached = live_repair_reserve(
-			    &repairHistory, sizeof sendArena, tx->sizes[0],
-			    tx->sizes[1], tx->seq, tx->stamp, fps, reserved,
-			    until);
-		} else {
-			/* A single-screen stream has no second panel, so it
-			 * cannot share the two-panel repair arena; send it
-			 * directly without repair. */
-			single_frame = (LiveRepairFrame){0};
-			single_frame.top = tx->sizes[0];
-			single_frame.bottom = tx->sizes[1];
-			tx->cached = &single_frame;
-		}
-		if (tx->cached) {
-			tx->sending[0] =
-			    sendArena + (tx->sizes[0] && tx->sizes[1]
-					     ? tx->cached->offset
-					     : 0);
-			tx->sending[1] = tx->sending[0] + tx->sizes[0];
-		}
-		for (unsigned sc = 0; tx->cached && sc < 2; sc++) {
-			const u8 *panel = pendingBytes + pair->offset +
-					  (sc ? pair->length[0] : 0);
-
-			memcpy(tx->sending[sc],
-			       send_key ? row_anchor_panel(rowCandidate, sc)
-					: panel,
-			       tx->sizes[sc]);
-		}
+		sender_copy_panels(tx, pair, send_key);
 		live_pending_remove(&pending, slot);
 	}
 	LightLock_Unlock(&lock);
