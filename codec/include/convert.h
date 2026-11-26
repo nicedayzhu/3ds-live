@@ -18,11 +18,11 @@ extern "C" {
 
 /* Matches GSPGPU_FramebufferFormat. */
 enum {
-    FB_RGBA8  = 0,
-    FB_BGR8   = 1,
-    FB_RGB565 = 2,
-    FB_RGB5A1 = 3,
-    FB_RGBA4  = 4,
+	FB_RGBA8 = 0,
+	FB_BGR8 = 1,
+	FB_RGB565 = 2,
+	FB_RGB5A1 = 3,
+	FB_RGBA4 = 4,
 };
 
 /*
@@ -32,14 +32,17 @@ enum {
  * or 0 for an unknown format.
  */
 uint32_t fb_to_rgb565(uint16_t *dst, const uint8_t *src, uint32_t format,
-                      uint32_t cols, uint32_t rows, uint32_t stride, uint32_t step);
+		      uint32_t cols, uint32_t rows, uint32_t stride,
+		      uint32_t step);
 
-/* One column of `rows` pixels to RGB565 (step 1). Returns 0 for an unknown format. */
-int fb_column_to_rgb565(uint16_t *dst, const uint8_t *src, uint32_t format, uint32_t rows);
+/* One column of `rows` pixels to RGB565 (step 1). Returns 0 for an unknown
+ * format. */
+int fb_column_to_rgb565(uint16_t *dst, const uint8_t *src, uint32_t format,
+			uint32_t rows);
 
 static inline uint32_t fb_out_bytes(uint32_t cols, uint32_t rows, uint32_t step)
 {
-    return (cols / step) * (rows / step) * 2u;
+	return (cols / step) * (rows / step) * 2u;
 }
 
 #ifdef __cplusplus

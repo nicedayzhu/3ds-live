@@ -20,10 +20,12 @@ extern "C" {
 #define LIVE_AUDIO_RECORD_BYTES 175u
 #define LIVE_AUDIO_HEADER_BYTES 24u
 #define LIVE_AUDIO_MAX_RECORDS 6u
-#define LIVE_AUDIO_MAX_PACKET_BYTES (LIVE_AUDIO_HEADER_BYTES + LIVE_AUDIO_MAX_RECORDS * LIVE_AUDIO_RECORD_BYTES)
+#define LIVE_AUDIO_MAX_PACKET_BYTES                                            \
+	(LIVE_AUDIO_HEADER_BYTES +                                             \
+	 LIVE_AUDIO_MAX_RECORDS * LIVE_AUDIO_RECORD_BYTES)
 
 typedef struct {
-    uint8_t index[LIVE_AUDIO_CHANNELS];
+	uint8_t index[LIVE_AUDIO_CHANNELS];
 } LiveAudioState;
 
 /* Encoder state contains only the two carried step indices. Each block
@@ -38,14 +40,15 @@ void live_audio_reset(LiveAudioState *state);
  * both state and dst unchanged. Input/output buffers may overlap; state
  * must not overlap either buffer. No allocation or floating point. */
 size_t live_audio_encode(LiveAudioState *state, const int16_t *pcm,
-                         size_t sample_frames, uint8_t *dst, size_t dst_capacity);
+			 size_t sample_frames, uint8_t *dst,
+			 size_t dst_capacity);
 
 /* src_bytes must be exactly BLOCK_BYTES; both reserved bytes must be zero
  * and both step indices at most 88. pcm_capacity_frames counts stereo
  * sample frames, not scalar int16 values. Returns SAMPLES on success, zero
  * on invalid input without modifying pcm. Input/output may overlap. */
-size_t live_audio_decode(const uint8_t *src, size_t src_bytes,
-                         int16_t *pcm, size_t pcm_capacity_frames);
+size_t live_audio_decode(const uint8_t *src, size_t src_bytes, int16_t *pcm,
+			 size_t pcm_capacity_frames);
 
 #ifdef __cplusplus
 }

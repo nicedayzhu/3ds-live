@@ -4,7 +4,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$roots = @('sysmod/source', 'sysmod/include', 'app/source')
+$roots = @('sysmod/source', 'sysmod/include', 'app/source', 'codec/source',
+    'codec/include')
 $files = foreach ($root in $roots) {
     $path = Join-Path $repo $root
     if (Test-Path $path) {
