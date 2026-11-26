@@ -1954,27 +1954,26 @@ static void stream_write_stats(bool timing_saved)
 #endif
 }
 
-void live_stop(void)
+static void stream_join_threads(void)
 {
-	__atomic_store_n(&stopping, true, __ATOMIC_RELEASE);
-	for (unsigned i = 0; i < 3; i++)
-		LightEvent_Signal(&events[i]);
-	for (unsigned i = 0; i < 2; i++)
-		if (encoders[i]) {
-			threadJoin(encoders[i], U64_MAX);
-			threadFree(encoders[i]);
-			encoders[i] = NULL;
-		}
+	for (unsigned i = 0; i < 2; i++) {
+		if (!encoders[i])
+			continue;
+		threadJoin(encoders[i], U64_MAX);
+		threadFree(encoders[i]);
+		encoders[i] = NULL;
+	}
 	if (worker) {
 		threadJoin(worker, U64_MAX);
 		threadFree(worker);
 		worker = NULL;
 	}
+}
+
+static void stream_close_resources(void)
+{
 	queue_network_report();
 	rowBase = rowCandidate = rowProbe = rowBanks = NULL;
-#ifdef LIVE_FRAME_TIMING
-	bool timingSaved = live_timing_export(session, started);
-#endif
 	live_net_close(&net);
 	if (socReady) {
 		socExit();
@@ -1984,9 +1983,20 @@ void live_stop(void)
 		live_jpeg_reset(i);
 		live_jpeg_source_destroy(rawSources[i]);
 		rawSources[i] = NULL;
-		rawWorking[i] = NULL; /* Caller releases the complete
-					 SYSTEM arena. */
+		rawWorking[i] = NULL; /* Caller releases the SYSTEM arena. */
 	}
+}
+
+void live_stop(void)
+{
+	__atomic_store_n(&stopping, true, __ATOMIC_RELEASE);
+	for (unsigned i = 0; i < 3; i++)
+		LightEvent_Signal(&events[i]);
+	stream_join_threads();
+#ifdef LIVE_FRAME_TIMING
+	bool timingSaved = live_timing_export(session, started);
+#endif
+	stream_close_resources();
 #ifdef LIVE_FRAME_TIMING
 	stream_write_stats(timingSaved);
 #else
