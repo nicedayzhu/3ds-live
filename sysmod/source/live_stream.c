@@ -1,5 +1,6 @@
 #include "live_stream.h"
 #include "live_config.h"
+#include "live_net_report.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -983,92 +984,54 @@ static void send_audio(u64 *due)
 	 */
 	live_audio_history_store(&audioHistory, fresh, count, firstCapture);
 }
-static const char *format_address(u32 address, char *out)
+static void network_report_snapshot(struct live_net_report *snapshot)
 {
-	struct in_addr ip = {.s_addr = htonl(address)};
-	return inet_ntop(AF_INET, &ip, out, INET_ADDRSTRLEN) ? out : "?";
+	memset(snapshot, 0, sizeof(*snapshot));
+	snapshot->session = session;
+	snapshot->automatic = automaticHost;
+	snapshot->peer_ready = mediaReady;
+	snapshot->polls = netDiag.polls;
+	snapshot->local_address = localAddress;
+	snapshot->local_mask = localMask;
+	snapshot->last_destination = netDiag.lastDestination;
+	snapshot->peer_address = ntohl(target.sin_addr.s_addr);
+	snapshot->local_port = netDiag.localPort;
+	snapshot->media_port = ntohs(target.sin_port);
+	snapshot->info_result = netDiag.infoResult;
+	snapshot->info_errno = netDiag.infoErrno;
+	snapshot->socket_errno = netDiag.socketErrno;
+	snapshot->bind_errno = netDiag.bindErrno;
+	snapshot->probe_attempts = netDiag.probeAttempts;
+	snapshot->probes_sent = netDiag.probesSent;
+	snapshot->probe_errno = netDiag.sendErrno;
+	snapshot->receive_errno = netDiag.receiveErrno;
+	snapshot->received_datagrams = netDiag.replies;
+	snapshot->accepted_replies = netDiag.accepted;
+	snapshot->invites = netDiag.hints;
+	snapshot->invites_answered = netDiag.hintsAnswered;
 }
 
-enum { NETWORK_REPORT_BYTES = 768 };
-static LightLock networkReportLock;
-static char pendingNetworkReport[NETWORK_REPORT_BYTES];
-static u32 networkReportLength, networkReportVersion;
-static u64 networkReportRetryAt;
-
-static size_t network_report(char *text, size_t capacity)
+static size_t network_report_text(char *text, size_t capacity)
 {
-	char local[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN],
-	    destination[INET_ADDRSTRLEN], peer[INET_ADDRSTRLEN];
-	int n = snprintf(
-	    text, capacity,
-	    "session=%08lx\nautomatic=%u\npeer_ready=%u\nnetwork_polls=%lu\n"
-	    "local=%s\nmask=%s\nlast_probe_destination=%s\npeer=%s\nlocal_port="
-	    "%u\nmedia_port=%u\n"
-	    "ip_info_result=%d\nip_info_errno=%d\nsocket_errno=%d\nbind_errno=%"
-	    "d\n"
-	    "probe_attempts=%lu\nprobes_sent=%lu\nprobe_errno=%d\nreceive_"
-	    "errno=%d\n"
-	    "received_datagrams=%lu\naccepted_replies=%lu\ninvites=%"
-	    "lu\ninvites_answered=%lu\n",
-	    session, automaticHost, mediaReady, netDiag.polls,
-	    format_address(localAddress, local),
-	    format_address(localMask, mask),
-	    format_address(netDiag.lastDestination, destination),
-	    format_address(ntohl(target.sin_addr.s_addr), peer),
-	    netDiag.localPort, ntohs(target.sin_port), netDiag.infoResult,
-	    netDiag.infoErrno, netDiag.socketErrno, netDiag.bindErrno,
-	    netDiag.probeAttempts, netDiag.probesSent, netDiag.sendErrno,
-	    netDiag.receiveErrno, netDiag.replies, netDiag.accepted,
-	    netDiag.hints, netDiag.hintsAnswered);
-	return n > 0 && (size_t)n < capacity ? (size_t)n : 0;
+	struct live_net_report snapshot;
+
+	network_report_snapshot(&snapshot);
+	return live_net_report_format(text, capacity, &snapshot);
 }
 
-/* The socket worker owns the live network counters. Publish a complete copy
- * before handing it off, and never hold this lock during filesystem I/O. */
+/* The socket worker owns the live counters; publish one complete copy. */
 static void queue_network_report(void)
 {
-	char text[NETWORK_REPORT_BYTES];
-	size_t size = network_report(text, sizeof text);
-	if (!size)
-		return;
-	LightLock_Lock(&networkReportLock);
-	memcpy(pendingNetworkReport, text, size);
-	networkReportVersion++;
-	__atomic_store_n(&networkReportLength, (u32)size, __ATOMIC_RELEASE);
-	LightLock_Unlock(&networkReportLock);
+	struct live_net_report snapshot;
+
+	network_report_snapshot(&snapshot);
+	live_net_report_queue(&snapshot);
 	netDiag.savedAt = svcGetSystemTick();
 }
 
-/* Single consumer: startup and fallback run on main, otherwise the status
- * worker owns all writes through its final flush before joining. */
 void live_flush_network_report(bool force)
 {
-	if (!__atomic_load_n(&networkReportLength, __ATOMIC_ACQUIRE))
-		return;
-	if (!force && networkReportRetryAt &&
-	    svcGetSystemTick() < networkReportRetryAt)
-		return;
-	char text[NETWORK_REPORT_BYTES];
-	LightLock_Lock(&networkReportLock);
-	u32 size = __atomic_load_n(&networkReportLength, __ATOMIC_RELAXED),
-	    version = networkReportVersion;
-	memcpy(text, pendingNetworkReport, size);
-	LightLock_Unlock(&networkReportLock);
-	FILE *f = fopen("sdmc:/3ds/3ds-live/network-status.txt", "w");
-	bool ok = false;
-	if (f) {
-		size_t written = fwrite(text, 1, size, f);
-		ok = fclose(f) == 0 && written == size;
-	}
-	if (!ok) {
-		networkReportRetryAt = svcGetSystemTick() + SYSCLOCK_ARM11;
-		return;
-	}
-	networkReportRetryAt = 0;
-	LightLock_Lock(&networkReportLock);
-	if (version == networkReportVersion)
-		__atomic_store_n(&networkReportLength, 0, __ATOMIC_RELEASE);
-	LightLock_Unlock(&networkReportLock);
+	live_net_report_flush(force);
 }
 
 /* A fixed port receives invitations from PCs that can broadcast to the console.
@@ -2143,7 +2106,7 @@ Result live_start(void *(*allocate)(u32 bytes))
 	localAddress = localMask = 0;
 	memset(&netDiag, 0, sizeof netDiag);
 	__atomic_store_n(&mediaReady, false, __ATOMIC_RELEASE);
-	LightLock_Init(&networkReportLock);
+	live_net_report_init();
 	queue_network_report();
 	live_flush_network_report(true);
 	for (unsigned i = 0; i < 2; i++) {
@@ -2239,8 +2202,9 @@ void live_stop(void)
 	FILE *f = fopen("sdmc:/3ds/3ds-live/live-stats.txt", "w");
 	if (!f)
 		return;
-	char networkText[NETWORK_REPORT_BYTES];
-	size_t networkBytes = network_report(networkText, sizeof networkText);
+	char networkText[LIVE_NET_REPORT_BYTES];
+	size_t networkBytes =
+	    network_report_text(networkText, sizeof networkText);
 	fwrite(networkText, 1, networkBytes, f);
 #ifdef LIVE_FRAME_TIMING
 	fprintf(f, "timing_session=%08lx\ntiming_saved=%u\n",

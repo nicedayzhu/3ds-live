@@ -3,7 +3,7 @@ CC ?= cc
 OUT := ../../build/native-tests
 CPPFLAGS += -I../../../codec/include
 CFLAGS += -O2 -std=c11 -Wall -Wextra -Werror
-TESTS := test_live test_pacing test_rate test_pair test_repair_cache test_pending_queue test_jpeg_rows test_row_compression test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_live_config test_module_install test_launcher_status test_launcher_language
+TESTS := test_live test_pacing test_rate test_pair test_repair_cache test_pending_queue test_jpeg_rows test_row_compression test_audio_transport test_discovery test_capture_schedule test_wide_capture test_receiver_feedback test_status_led test_live_config test_live_net_report test_module_install test_launcher_status test_launcher_language
 BINS := $(addprefix $(OUT)/,$(TESTS))
 
 .PHONY: check
@@ -33,5 +33,7 @@ $(OUT)/test_launcher_language: CPPFLAGS += -I../../../app/source
 $(OUT)/test_launcher_language: ../../../app/source/launcher_language.c ../../../app/source/launcher_language.h
 $(OUT)/test_live_config: CPPFLAGS += -I../../../sysmod/source
 $(OUT)/test_live_config: ../../../sysmod/source/live_config.c ../../../sysmod/source/live_config.h
+$(OUT)/test_live_net_report: CPPFLAGS += -I../../../sysmod/source
+$(OUT)/test_live_net_report: ../../../sysmod/source/live_net_report_format.c ../../../sysmod/source/live_net_report.h
 $(OUT)/%: %.c $(wildcard ../../../codec/include/live*.h) | $(OUT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(filter %.c,$^) -o $@
