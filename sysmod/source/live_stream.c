@@ -72,14 +72,6 @@ static unsigned qualityTarget;
 static unsigned quality = 60, spare;
 static LivePayloadControl payloadControl;
 static u32 jobKind, jobQuality, jobDone, jobSize[2], jobChanged[2], jobUs[2];
-/* The bottom screen is mostly a map/status panel. Encoding it at 8 fps and a
- * lower quality leaves the top screen enough CPU to keep 30 fps while the game
- * is running. The previous JPEG is re-sent on skipped frames, so receivers need
- * no protocol change; at Q25 a reused bottom costs only a few KB. */
-#define BOTTOM_FPS 8u
-#define BOTTOM_REUSE_BYTES 24576u
-static u8 bottomReuse[BOTTOM_REUSE_BYTES];
-static u32 bottomReuseSize;
 /* Bit 0 = top screen, bit 1 = bottom screen. A single-screen mask skips the
  * hidden encoder entirely and sends per-screen packets, so both ARM11 time and
  * airtime are released instead of rendering a panel nobody displays. */
@@ -265,31 +257,15 @@ static bool run_single_job(unsigned kind, unsigned q, unsigned sc)
 	return !stopped();
 }
 
-static bool run_pair_job(unsigned kind, unsigned q, bool bottom)
+static bool run_pair_job(unsigned kind, unsigned q)
 {
 	jobKind = kind;
 	jobQuality = q;
-	if (!bottom) {
-		/* Bottom is not due: reuse its last JPEG and spend the time on
-		 * top. */
-		memcpy(encoded[1], bottomReuse, bottomReuseSize);
-		jobSize[1] = bottomReuseSize;
-		jobUs[1] = 0;
-		jobChanged[1] = 0;
-		encode_job(0, kind, q);
-		return !stopped();
-	}
 	__atomic_store_n(&jobDone, 0, __ATOMIC_RELEASE);
 	LightEvent_Signal(&events[1]);
 	encode_job(0, kind, q);
 	while (!__atomic_load_n(&jobDone, __ATOMIC_ACQUIRE) && !stopped())
 		LightEvent_WaitTimeout(&events[2], 1000000);
-	if (jobSize[1] && jobSize[1] <= BOTTOM_REUSE_BYTES) {
-		memcpy(bottomReuse, encoded[1], jobSize[1]);
-		bottomReuseSize = jobSize[1];
-	} else {
-		bottomReuseSize = 0;
-	}
 	return !stopped();
 }
 static u32 payload_size(unsigned screen, unsigned q, bool combined)
@@ -584,7 +560,6 @@ static void configure_stream(u32 hz, u32 bps, bool fec, unsigned targetQ)
 	qualityTarget = targetQ;
 	configChanges++;
 	/* A new quality/rate invalidates the reused bottom JPEG. */
-	bottomReuseSize = 0;
 }
 
 static void encoder(void *arg)
@@ -726,8 +701,7 @@ static void encoder(void *arg)
 			memcpy(pendingBytes + pair->offset, encoded[sc], wire);
 			continue;
 		}
-		const bool bottom = true;
-		if (!run_pair_job(1, q, bottom))
+		if (!run_pair_job(1, q))
 			break;
 		live_timing_encoded();
 		RowPairPlan plan;
@@ -760,7 +734,7 @@ static void encoder(void *arg)
 				break;
 			retries++;
 			q = nextQ;
-			if (!run_pair_job(2, q, bottom))
+			if (!run_pair_job(2, q))
 				break;
 			live_timing_encoded();
 		}
@@ -776,7 +750,7 @@ static void encoder(void *arg)
 				maxUs[i] = jobUs[i];
 			__atomic_store_n(&lastEncodeUs[i], jobUs[i],
 					 __ATOMIC_RELAXED);
-			if (fits && (i == 0 || bottom)) {
+			if (fits) {
 				__atomic_add_fetch(&jpegFrames[i], 1,
 						   __ATOMIC_RELAXED);
 				if (jobSize[i] > maxBytes[i])
@@ -1039,7 +1013,6 @@ static void apply_screen_mask_locked(u32 mask)
 	screenMask = mask;
 	while (pending.count)
 		discard_pending(pending.head, TIMING_RECONFIGURED);
-	bottomReuseSize = 0;
 	rowBase = rowCandidate = NULL;
 }
 
@@ -1802,7 +1775,6 @@ Result live_start(void *(*allocate)(u32 bytes))
 	qualityTarget = 0;
 	quality = 60;
 	spare = 0;
-	bottomReuseSize = 0;
 	screenMask = 3;
 	payloadControl = (LivePayloadControl){.percent = 100};
 	compactSavedBytes = 0;
