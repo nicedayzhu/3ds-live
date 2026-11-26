@@ -19,8 +19,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Windows build input; this release must keep a Windows zip with runtime/models.
-  SEED_TAG: v0.1.13
+  # Model seed is independent of the application version. Change MODELS_TAG only
+  # when the ONNX/model set changes; normal releases do not edit this workflow.
+  SEED_TAG: ${{ vars.MODELS_TAG || 'v0.1.13' }}
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:

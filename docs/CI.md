@@ -21,6 +21,12 @@ TensorRT 版依赖本机 CUDA/TensorRT 和为本机 GPU 生成的 plan，由本�
 需要 TensorRT 版本时联系作者 [@nicedayzhu](https://github.com/nicedayzhu)，不通过
 GitHub Actions 发布第二包。
 
+## 版本与模型
+
+正常发版只需运行 `scripts/bump-version.ps1` 并推送标签，见 [RELEASE.md](RELEASE.md)。
+
+Windows 构建从仓库变量 `MODELS_TAG` 指向的 Release 获取模型，默认 `v0.1.13`；只有模型变化时才更新该变量。
+
 ## 发布产物
 
 每个 Release 包含：
