@@ -32,6 +32,10 @@ int main(void) {
     assert(live_config_jpeg_target(r16,sizeof r16,0)==20);
     r16[25]=1;
     assert(!live_valid_quality_target(live_config_jpeg_target(r16,sizeof r16,0)));
+    uint8_t r16v2[32]="R16C";
+    r16v2[24]=20;
+    r16v2[28]=3;
+    assert(live_config_jpeg_target(r16v2,sizeof r16v2,0)==20);
     for(unsigned q=0;q<=100;q++)
         assert(live_valid_quality_target(q)==(q==0||q==15||q==20||q==25||q==30||q==35||q==40||q==50||q==60||q==70||q==80));
     const unsigned manual_targets[]={20,40,60,80};

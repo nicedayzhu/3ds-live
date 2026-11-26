@@ -58,7 +58,8 @@ static inline int live_valid_quality_target(unsigned q) {
 /* The caller has validated the R6CF/R10C/R16C tag and exact length. Only
  * R16C carries a JPEG selection; its explicit zero requests automatic Q. */
 static inline uint32_t live_config_jpeg_target(const uint8_t *msg,size_t length,uint32_t current) {
-    if(length!=28)return current;
+    /* R16C v1 is 28 bytes; v2 appends the screen mask and is 32 bytes. */
+    if(length!=28&&length!=32)return current;
     return (uint32_t)msg[24]|(uint32_t)msg[25]<<8|(uint32_t)msg[26]<<16|(uint32_t)msg[27]<<24;
 }
 static inline uint32_t live_quality_budget(uint32_t video_rate,uint32_t fps,int combined,unsigned target) {
