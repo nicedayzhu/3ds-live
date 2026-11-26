@@ -1843,39 +1843,8 @@ Result live_start(void *(*allocate)(u32 bytes))
 	}
 	return 0;
 }
-void live_stop(void)
+static void stream_write_stats(bool timing_saved)
 {
-	__atomic_store_n(&stopping, true, __ATOMIC_RELEASE);
-	for (unsigned i = 0; i < 3; i++)
-		LightEvent_Signal(&events[i]);
-	for (unsigned i = 0; i < 2; i++)
-		if (encoders[i]) {
-			threadJoin(encoders[i], U64_MAX);
-			threadFree(encoders[i]);
-			encoders[i] = NULL;
-		}
-	if (worker) {
-		threadJoin(worker, U64_MAX);
-		threadFree(worker);
-		worker = NULL;
-	}
-	queue_network_report();
-	rowBase = rowCandidate = rowProbe = rowBanks = NULL;
-#ifdef LIVE_FRAME_TIMING
-	bool timingSaved = live_timing_export(session, started);
-#endif
-	live_net_close(&net);
-	if (socReady) {
-		socExit();
-		socReady = false;
-	}
-	for (unsigned i = 0; i < 2; i++) {
-		live_jpeg_reset(i);
-		live_jpeg_source_destroy(rawSources[i]);
-		rawSources[i] = NULL;
-		rawWorking[i] = NULL; /* Caller releases the complete
-					 SYSTEM arena. */
-	}
 	char network_text[LIVE_NET_REPORT_BYTES];
 	size_t network_bytes;
 	struct live_stats stats = {
@@ -1970,6 +1939,49 @@ void live_stop(void)
 	network_bytes = network_report_text(network_text, sizeof(network_text));
 	live_stats_write("sdmc:/3ds/3ds-live/live-stats.txt", &stats,
 			 network_text, network_bytes);
+#ifndef LIVE_FRAME_TIMING
+	(void)timing_saved;
+#endif
+}
+
+void live_stop(void)
+{
+	__atomic_store_n(&stopping, true, __ATOMIC_RELEASE);
+	for (unsigned i = 0; i < 3; i++)
+		LightEvent_Signal(&events[i]);
+	for (unsigned i = 0; i < 2; i++)
+		if (encoders[i]) {
+			threadJoin(encoders[i], U64_MAX);
+			threadFree(encoders[i]);
+			encoders[i] = NULL;
+		}
+	if (worker) {
+		threadJoin(worker, U64_MAX);
+		threadFree(worker);
+		worker = NULL;
+	}
+	queue_network_report();
+	rowBase = rowCandidate = rowProbe = rowBanks = NULL;
+#ifdef LIVE_FRAME_TIMING
+	bool timingSaved = live_timing_export(session, started);
+#endif
+	live_net_close(&net);
+	if (socReady) {
+		socExit();
+		socReady = false;
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		live_jpeg_reset(i);
+		live_jpeg_source_destroy(rawSources[i]);
+		rawSources[i] = NULL;
+		rawWorking[i] = NULL; /* Caller releases the complete
+					 SYSTEM arena. */
+	}
+#ifdef LIVE_FRAME_TIMING
+	stream_write_stats(timingSaved);
+#else
+	stream_write_stats(false);
+#endif
 }
 bool live_submit(int sc, const u8 *frame, u32 fmt, u32 stride, u32 pts,
 		 bool wide)
