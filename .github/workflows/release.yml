@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SEED_TAG: v0.1.13
+  SEED_TAG: v0.1.12
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
@@ -61,7 +61,7 @@ jobs:
 
   build-windows:
     name: Build Windows player
-    runs-on: ${{ fromJSON(vars.WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: jurplel/install-qt-action@v4
@@ -86,18 +86,8 @@ jobs:
           "LIVE_MODELS=$($model.Directory.FullName)" >> $env:GITHUB_ENV
       - name: Build and deploy
         shell: pwsh
-        env:
-          TENSORRT_ROOT: ${{ vars.TENSORRT_ROOT }}
-          ACCELERATION_DIR: ${{ vars.ACCELERATION_DIR }}
         run: |
-          $args = @('-QtSdk', $env:QT_ROOT_DIR, '-SkipTests', '-Models', $env:LIVE_MODELS)
-          if ($env:TENSORRT_ROOT -or $env:ACCELERATION_DIR) {
-            if (!$env:TENSORRT_ROOT -or !$env:ACCELERATION_DIR) {
-              throw 'Set both TENSORRT_ROOT and ACCELERATION_DIR, or neither'
-            }
-            $args += @('-TensorRT', '-AccelerationDirectory', $env:ACCELERATION_DIR)
-          }
-          .\live\qt\build.ps1 @args
+          .\live\qt\build.ps1 -QtSdk $env:QT_ROOT_DIR -SkipTests -Models $env:LIVE_MODELS
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -209,6 +199,12 @@ jobs:
           2. 掌机端将 \`3ds-live.3dsx\` 放到 \`/3ds/3ds-live/\`，或安装 \`3ds-live.cia\`。
           3. 在 Luma3DS 配置中勾选 **Enable loading external FIRMs and modules**，打开 **3DS Live** 后按 **R + SELECT**。
           4. Android 安装 \`3DS-Live-${version}-Android-arm64.apk\`，与掌机连接同一局域网；手机和 PC 不要同时接收。
+
+          ## Windows 后端说明
+
+          自动构建的 Windows 包使用 DirectML/CPU 后端，不包含本地生成的 TensorRT plan。
+          如需 TensorRT 加速版，请使用本地构建包或联系作者
+          [@nicedayzhu](https://github.com/nicedayzhu)。
 
           ## 校验
 

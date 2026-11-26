@@ -1,12 +1,14 @@
 [CmdletBinding()]
-param([string]$WindowsDirectory)
+param([string]$WindowsDirectory, [string]$Archive)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $repo 'dist'
 $windows = if ($WindowsDirectory) { (Resolve-Path -LiteralPath $WindowsDirectory).Path } else { Join-Path $dist 'Windows' }
 $version = (Get-Content -LiteralPath "$repo/VERSION" -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid 3DS Live bundle VERSION.' }
-$archive = Join-Path $dist "3DS-Live-$version-Windows-x64-New3DS.zip"
+$archive = if ($Archive) { [IO.Path]::GetFullPath($Archive) } else {
+    Join-Path $dist "3DS-Live-$version-Windows-x64-New3DS.zip"
+}
 $guide = Join-Path $dist '使用指南.html'
 $files = [ordered]@{
     '使用指南.html' = $guide
