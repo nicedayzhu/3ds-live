@@ -926,42 +926,6 @@ void live_flush_network_report(bool force)
 	live_net_report_flush(force);
 }
 
-static bool send_discovery_probe(const u8 *probe, u32 address, u64 *due)
-{
-	struct sockaddr_in destination = net.target;
-	destination.sin_addr.s_addr = htonl(address);
-	net.diag.last_destination = address;
-	net.diag.probe_attempts++;
-	bool paired = net.media_ready && address == net.discovery.peer;
-	if (paired && pacingMode)
-		pacing_sleep_until(*due);
-	u64 begin = paired ? svcGetSystemTick() : 0;
-	int sent = sendto(net.fd, probe, LIVE_DISCOVERY_BYTES, 0,
-			  (struct sockaddr *)&destination, sizeof destination);
-	if (paired) {
-		u64 returned = svcGetSystemTick();
-		if (pacingMode)
-			pacing_charge(due, begin, returned,
-				      LIVE_DISCOVERY_BYTES + 28, PACKET_STATUS);
-		else
-			live_packet_observe(&packetReport, PACKET_STATUS, begin,
-					    returned, 0, SYSCLOCK_ARM11);
-	}
-	if (sent != LIVE_DISCOVERY_BYTES) {
-		net.diag.send_errno = errno;
-		return false;
-	}
-	net.diag.probes_sent++;
-	net.diag.send_errno = 0;
-	if (!net.diag.local_port) {
-		struct sockaddr_in local = {0};
-		socklen_t size = sizeof local;
-		if (getsockname(net.fd, (struct sockaddr *)&local, &size) == 0)
-			net.diag.local_port = ntohs(local.sin_port);
-	}
-	return true;
-}
-
 static void reset_receiver_feedback(void)
 {
 	receiverFeedback = (LiveReceiverFeedback){0};
@@ -999,117 +963,6 @@ static void reset_peer_config(void)
 		clear_pending();
 	}
 	LightLock_Unlock(&lock);
-}
-
-static void poll_discovery(u64 now, u64 *due)
-{
-	bool expired =
-	    live_discover_expire(&net.discovery, now, SYSCLOCK_ARM11);
-	if (!expired && net.last_probe_tick &&
-	    now - net.last_probe_tick < SYSCLOCK_ARM11)
-		return;
-	net.last_probe_tick = now;
-	net.diag.polls++;
-	if (net.fd < 0)
-		live_net_open(&net);
-	/* A live reply on this socket verifies the route. Avoid a synchronous
-	 * SOC network-configuration query on each second of an active stream.
-	 */
-	if (!expired && net.media_ready && net.last_peer_control &&
-	    now >= net.last_peer_control &&
-	    now - net.last_peer_control <
-		(u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11) {
-		if (net.automatic_host && net.discovery.peer) {
-			u8 probe[LIVE_DISCOVERY_BYTES];
-			live_discover_invited_probe(&net.discovery, session,
-						    probe);
-			send_discovery_probe(probe, net.discovery.peer, due);
-		}
-		return;
-	}
-	struct in_addr ip = {0}, mask = {0}, broadcast = {0};
-	net.diag.info_result = SOCU_GetIPInfo(&ip, &mask, &broadcast);
-	net.diag.info_errno = net.diag.info_result ? errno : 0;
-	if (!ip.s_addr) {
-		long host = gethostid();
-		if (host != -1)
-			ip.s_addr = (u32)host;
-	}
-	u32 address = ntohl(ip.s_addr), netmask = ntohl(mask.s_addr);
-	bool moved = address && net.local_address &&
-		     (address != net.local_address ||
-		      (netmask && net.local_mask && netmask != net.local_mask));
-	if (expired || moved) {
-		__atomic_store_n(&net.media_ready, false, __ATOMIC_RELEASE);
-		reset_receiver_feedback();
-		net.discovery.peer = 0;
-		net.discovery.outstanding = false;
-		if (net.automatic_host)
-			net.target.sin_addr.s_addr = 0;
-		reset_peer_config();
-		if (net.fd >= 0) {
-			live_net_close(&net);
-		}
-		net.diag.local_port = 0;
-		live_net_open(&net);
-	}
-	if (address) {
-		if (address != net.local_address || netmask)
-			net.local_mask = netmask;
-		net.local_address = address;
-	}
-	net.diag.reported_broadcast = ntohl(broadcast.s_addr);
-	if (!net.media_ready &&
-	    (net.diag.polls == 2 ||
-	     now - net.diag.saved_at >= 5ull * SYSCLOCK_ARM11))
-		queue_network_report();
-	if (net.fd < 0)
-		return;
-	if (!net.automatic_host) {
-		bool usable =
-		    live_peer_address(ntohl(net.target.sin_addr.s_addr),
-				      net.local_address, net.local_mask);
-		if (!usable && net.media_ready)
-			reset_receiver_feedback();
-		if (net.last_peer_control &&
-		    (!usable ||
-		     now - net.last_peer_control >=
-			 (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11))
-			reset_peer_config();
-		bool wasReady = net.media_ready;
-		__atomic_store_n(&net.media_ready, usable, __ATOMIC_RELEASE);
-		if (wasReady != usable)
-			queue_network_report();
-		return;
-	}
-	u8 probe[LIVE_DISCOVERY_BYTES];
-	live_discover_probe(&net.discovery, session, probe);
-	bool sent;
-	if (net.discovery.peer)
-		sent = send_discovery_probe(probe, net.discovery.peer, due);
-	else {
-		/* Routers and SOC implementations differ in handling subnet vs
-		 * limited broadcast. Both probes share one challenge and expose
-		 * no media. */
-		u32 subnet = net.diag.reported_broadcast;
-		if (!subnet && net.local_address && net.local_mask)
-			subnet = live_broadcast_address(net.local_address,
-							net.local_mask);
-		sent = subnet && subnet != UINT32_MAX &&
-		       send_discovery_probe(probe, subnet, due);
-		if (send_discovery_probe(probe, UINT32_MAX, due))
-			sent = true;
-	}
-	if (!sent) {
-		net.discovery.outstanding = false;
-		/* Even if SOC refuses outbound broadcasts, the fixed listener
-		 * must stay open so a PC invitation can initiate the unicast
-		 * handshake. */
-		if (!net.discovery.peer && net.diag.bind_errno) {
-			live_net_close(&net);
-			net.diag.local_port = 0;
-		}
-	}
 }
 
 static u64 send_status(u64 *due, const u8 *msg, u32 size)
@@ -1276,11 +1129,38 @@ static const struct live_control_ops control_ops = {
     .feedback = control_feedback,
 };
 
+static bool net_paced(void)
+{
+	return pacingMode != 0;
+}
+
+static void net_observe_probe(u64 begin, u64 returned, u32 wire)
+{
+	live_packet_observe(&packetReport, PACKET_STATUS, begin, returned, wire,
+			    SYSCLOCK_ARM11);
+}
+
+static void net_charge_packet(u64 *due, u64 begin, u64 returned, u32 wire,
+			      int kind)
+{
+	pacing_charge(due, begin, returned, wire, (enum LivePacketKind)kind);
+}
+
+static const struct live_net_ops net_ops = {
+    .paced = net_paced,
+    .sleep_until = pacing_sleep_until,
+    .charge = net_charge_packet,
+    .observe = net_observe_probe,
+    .report = queue_network_report,
+    .reset_peer = reset_peer_config,
+    .reset_feedback = reset_receiver_feedback,
+};
+
 static void control(u64 *due)
 {
 	u64 now = svcGetSystemTick();
 	if (net.fd < 0)
-		poll_discovery(now, due);
+		live_net_poll(&net, session, now, due, &net_ops);
 	if (net.fd < 0)
 		return;
 	if (rowLastAck &&
@@ -1334,7 +1214,8 @@ static void control(u64 *due)
 				u8 probe[LIVE_DISCOVERY_BYTES];
 				live_discover_invited_probe(&net.discovery,
 							    session, probe);
-				if (send_discovery_probe(probe, address, due))
+				if (live_net_send_probe(&net, probe, address,
+							due, &net_ops))
 					net.diag.hints_answered++;
 				continue;
 			}
@@ -1382,7 +1263,7 @@ static void control(u64 *due)
 	}
 	/* Consume queued acknowledgements before expiring the lease, rotating
 	 * the challenge or closing the only socket that can receive them. */
-	poll_discovery(svcGetSystemTick(), due);
+	live_net_poll(&net, session, svcGetSystemTick(), due, &net_ops);
 	now = svcGetSystemTick();
 	if (!net.media_ready || now - lastStatusTick < SYSCLOCK_ARM11)
 		return;

@@ -1,9 +1,9 @@
 /*
- * Media socket and peer addressing state.
+ * Socket + discovery owner.
  *
- * Discovery, control and sender code share one endpoint description.  Keeping
- * it in one struct prevents the three subsystems from growing their own copies
- * of fd/target/ready flags.
+ * Discovery probes and the periodic network-configuration check live here.
+ * Policy that belongs to the stream (peer reset, receiver feedback, report
+ * scheduling, packet pacing) is injected through live_net_ops.
  */
 #ifndef LIVE_NET_H
 #define LIVE_NET_H
@@ -49,12 +49,29 @@ struct live_net {
 	struct live_net_diag diag;
 };
 
-/* Open the non-blocking UDP media socket. */
-int live_net_open(struct live_net *net);
+struct live_net_ops {
+	bool (*paced)(void);
+	void (*sleep_until)(uint64_t due);
+	void (*charge)(uint64_t *due, uint64_t begin, uint64_t returned,
+		       uint32_t wire, int kind);
+	void (*observe)(uint64_t begin, uint64_t returned, uint32_t wire);
+	void (*report)(void);
+	void (*reset_peer)(void);
+	void (*reset_feedback)(void);
+};
 
+int live_net_open(struct live_net *net);
 void live_net_close(struct live_net *net);
 
-/* Fill the portable network-status snapshot. */
+/* Send one discovery probe; used by poll and by invitation replies. */
+bool live_net_send_probe(struct live_net *net, const uint8_t *probe,
+			 uint32_t address, uint64_t *due,
+			 const struct live_net_ops *ops);
+
+/* Periodic lease check, address-change detection and probe scheduling. */
+void live_net_poll(struct live_net *net, uint32_t session, uint64_t now,
+		   uint64_t *due, const struct live_net_ops *ops);
+
 void live_net_snapshot(const struct live_net *net, uint32_t session,
 		       struct live_net_report *snapshot);
 
