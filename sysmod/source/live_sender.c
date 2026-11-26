@@ -424,7 +424,7 @@ void sender(void *unused)
 		control(&pacing.totalDue);
 		if (!stream.net.media_ready || live_stream_capture_paused()) {
 			svcSleepThread(10000000);
-			return;
+			continue;
 		}
 		send_audio(&pacing.totalDue);
 		struct tx_frame tx;
@@ -433,7 +433,7 @@ void sender(void *unused)
 			if (!send_repair(&pacing.totalDue, svcGetSystemTick(),
 					 0))
 				svcSleepThread(500000);
-			return;
+			continue;
 		}
 		sender_send_frame(&tx, &pacing, &sentFrame, &lastSentSeq);
 	}
