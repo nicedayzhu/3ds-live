@@ -4,11 +4,12 @@
 include $(DEVKITARM)/3ds_rules
 
 APP_TITLE := 3DS Live
-APP_DESCRIPTION := Wireless dual-screen streaming for New Nintendo 3DS (v$(strip $(file <../VERSION)))
+APP_VERSION := $(strip $(file <../VERSION))
+APP_DESCRIPTION := Wireless dual-screen streaming for New Nintendo 3DS (v$(APP_VERSION))
 APP_AUTHOR := nicedayzhu
 APP_ICON := assets/icon.png
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11 $(ARCH) -mword-relocations -D__3DS__ -I$(CTRULIB)/include -I../codec/include -I../sysmod/build/3dslive
+CFLAGS := -O2 -Wall -Wextra -Werror -std=gnu11 $(ARCH) -mword-relocations -D__3DS__ -DLIVE_LAUNCHER_VERSION='"$(APP_VERSION)"' -I$(CTRULIB)/include -I../codec/include -I../sysmod/build/3dslive
 OBJECTS := $(patsubst source/%.c,build/%.o,$(wildcard source/*.c)) build/launcher_font.o
 MODULE := ../sysmod/3dslive.cxi
 MODULE_ID := ../sysmod/build/3dslive/module_id.h

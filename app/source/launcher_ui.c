@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef LIVE_LAUNCHER_VERSION
+#define LIVE_LAUNCHER_VERSION "dev"
+#endif
+static const char launcher_version[] = "v" LIVE_LAUNCHER_VERSION;
+
 /* libctru presents BGR8 framebuffers as portrait columns, bottom pixel first.
  */
 typedef struct {
@@ -213,8 +218,10 @@ static void top_screen(Screen s, const LauncherView *v,
 		memcpy(dest, launcher_logo[column],
 		       sizeof launcher_logo[column]);
 	}
-	label(s, logo_x + LAUNCHER_LOGO_SIZE + 9, 35, HEADING, 0xF2F6EF,
-	      "3DS Live");
+	const int title_x = logo_x + LAUNCHER_LOGO_SIZE + 9;
+	label(s, title_x, 35, HEADING, 0xF2F6EF, "3DS Live");
+	label(s, title_x + text_width(HEADING, "3DS Live") + 8, 35, SMALL,
+	      MUTED, launcher_version);
 	battery(s, &v->device, text);
 	rect(s, 22, 52, 356, 1, 0x38504F);
 	dot(s, 26, 75, 4, accent);
