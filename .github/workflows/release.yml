@@ -215,7 +215,7 @@ jobs:
         run: |
           tag="$RELEASE_TAG"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" release/* --clobber
+            gh release upload "$tag" release/3DS-Live-* release/3ds-live.* release/checksums-* --clobber
             gh release edit "$tag" --title "3DS Live ${tag#v}" --notes-file release/notes.md
           else
             gh release create "$tag" \
