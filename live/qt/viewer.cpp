@@ -687,7 +687,7 @@ class Viewer final : public QWidget {
         jpegQuality = new QComboBox(settings);
         jpegQuality->setObjectName("jpegQuality");
         jpegQuality->addItem("自动", 0);
-        for (int q : {20, 40, 60, 80})
+        for (int q : {20, 40, 60, 70, 80})
             jpegQuality->addItem(QString("Q%1").arg(q), q);
         jpegQuality->setCurrentIndex(std::max(0, jpegQuality->findData(o["jpegQuality"].toInt())));
         jpegQuality->setToolTip("控制掌机上下屏的 JPEG 编码。Q 越高，通常越清晰、每帧也越大。自动档按带宽预算选择质量。");
