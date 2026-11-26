@@ -5,9 +5,16 @@ import '../theme/app_theme.dart';
 import 'widgets.dart';
 
 class DiagnosticsPage extends StatelessWidget {
-  const DiagnosticsPage({super.key, this.standalone = false});
+  const DiagnosticsPage({
+    super.key,
+    this.standalone = false,
+    this.onOpenSettings,
+    this.onToggleTheme,
+  });
 
   final bool standalone;
+  final VoidCallback? onOpenSettings;
+  final VoidCallback? onToggleTheme;
 
   @override
   Widget build(BuildContext context) {
@@ -27,7 +34,10 @@ class DiagnosticsPage extends StatelessWidget {
                 const Spacer(),
               ],
             ),
-          _DiagnosticsBody(onBack: standalone ? null : null),
+          _DiagnosticsBody(
+            onOpenSettings: onOpenSettings,
+            onToggleTheme: onToggleTheme,
+          ),
         ],
       ),
     );
@@ -39,9 +49,10 @@ class DiagnosticsPage extends StatelessWidget {
 }
 
 class _DiagnosticsBody extends StatelessWidget {
-  const _DiagnosticsBody({this.onBack});
+  const _DiagnosticsBody({this.onOpenSettings, this.onToggleTheme});
 
-  final VoidCallback? onBack;
+  final VoidCallback? onOpenSettings;
+  final VoidCallback? onToggleTheme;
 
   @override
   Widget build(BuildContext context) {
@@ -56,6 +67,18 @@ class _DiagnosticsBody extends StatelessWidget {
           children: [
             Text('诊断', style: theme.textTheme.headlineSmall),
             const Spacer(),
+            if (onToggleTheme != null)
+              IconButton(
+                tooltip: '切换深浅色',
+                onPressed: onToggleTheme,
+                icon: const Icon(Icons.contrast_rounded),
+              ),
+            if (onOpenSettings != null)
+              IconButton(
+                tooltip: '设置',
+                onPressed: onOpenSettings,
+                icon: const Icon(Icons.tune_rounded),
+              ),
             TextButton.icon(
               onPressed: () async {
                 final data = await controller.exportDiagnostics();

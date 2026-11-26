@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:three_ds_live/stream/live_controller.dart';
 import 'package:three_ds_live/stream/models.dart';
 import 'package:three_ds_live/theme/app_theme.dart';
+import 'package:three_ds_live/update_check.dart';
 import 'package:three_ds_live/ui/connect_page.dart';
 import 'package:three_ds_live/ui/diagnostics_page.dart';
 import 'package:three_ds_live/ui/live_page.dart';
@@ -33,6 +34,13 @@ void main() {
     expect(kStreamPresets.last.rate, 800000);
     expect(qualityLabel(0), '自动');
     expect(qualityLabel(70), 'Q70');
+  });
+
+  test('update versions compare numerically', () {
+    expect(isNewerVersion('0.1.13', '0.1.14'), isTrue);
+    expect(isNewerVersion('0.1.13', '0.2.0'), isTrue);
+    expect(isNewerVersion('0.1.13', '0.1.13'), isFalse);
+    expect(isNewerVersion('0.1.13', '0.1.9'), isFalse);
   });
 
   test('stats parse the native event payload', () {
@@ -68,6 +76,30 @@ void main() {
       scrollable: find.byType(Scrollable).first,
     );
     expect(find.text('首次使用？3 步开始投屏'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    controller.dispose();
+  });
+
+  testWidgets('connect page wires theme and settings actions', (tester) async {
+    await _phoneViewport(tester);
+    final controller = LiveController(mock: true);
+    await controller.initialize();
+    var themes = 0;
+    var settings = 0;
+    await tester.pumpWidget(_wrap(
+      controller,
+      ConnectPage(
+        onOpenLive: () {},
+        onToggleTheme: () => themes++,
+        onOpenSettings: () => settings++,
+      ),
+    ));
+
+    await tester.tap(find.byTooltip('切换深浅色'));
+    await tester.tap(find.byTooltip('设置'));
+    expect(themes, 1);
+    expect(settings, 1);
 
     await tester.pumpWidget(const SizedBox());
     controller.dispose();

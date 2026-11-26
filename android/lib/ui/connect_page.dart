@@ -7,9 +7,16 @@ import '../theme/app_theme.dart';
 import 'widgets.dart';
 
 class ConnectPage extends StatefulWidget {
-  const ConnectPage({super.key, required this.onOpenLive});
+  const ConnectPage({
+    super.key,
+    required this.onOpenLive,
+    this.onOpenSettings,
+    this.onToggleTheme,
+  });
 
   final VoidCallback onOpenLive;
+  final VoidCallback? onOpenSettings;
+  final VoidCallback? onToggleTheme;
 
   @override
   State<ConnectPage> createState() => _ConnectPageState();
@@ -102,8 +109,8 @@ class _ConnectPageState extends State<ConnectPage> {
         SliverToBoxAdapter(
           child: BrandBar(
             subtitle: controller.mockMode ? '演示模式' : null,
-            onTheme: () => _showThemeHint(context),
-            onSettings: () => _showSettingsHint(context),
+            onTheme: widget.onToggleTheme,
+            onSettings: widget.onOpenSettings,
           ),
         ),
         SliverPadding(
@@ -207,17 +214,7 @@ class _ConnectPageState extends State<ConnectPage> {
     );
   }
 
-  void _showThemeHint(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('用右上角图标切换深浅色（跟随系统 → 浅色 → 深色）。')),
-    );
-  }
 
-  void _showSettingsHint(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('底部「设置」标签可以修改端口、布局与录制选项。')),
-    );
-  }
 }
 
 class _GuideCard extends StatelessWidget {

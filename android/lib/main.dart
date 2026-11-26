@@ -28,13 +28,14 @@ class _ThreeDsLiveAppState extends State<ThreeDsLiveApp> {
     _controller.initialize();
   }
 
-  void _cycleTheme() {
+  void _toggleTheme() {
+    final systemDark =
+        WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+            Brightness.dark;
+    final dark = _themeMode == ThemeMode.dark ||
+        (_themeMode == ThemeMode.system && systemDark);
     setState(() {
-      _themeMode = switch (_themeMode) {
-        ThemeMode.system => ThemeMode.light,
-        ThemeMode.light => ThemeMode.dark,
-        ThemeMode.dark => ThemeMode.system,
-      };
+      _themeMode = dark ? ThemeMode.light : ThemeMode.dark;
     });
   }
 
@@ -55,7 +56,7 @@ class _ThreeDsLiveAppState extends State<ThreeDsLiveApp> {
         darkTheme: buildAppTheme(Brightness.dark),
         themeMode: _themeMode,
         home: AppShell(
-          onToggleTheme: _cycleTheme,
+          onToggleTheme: _toggleTheme,
           themeMode: _themeMode,
         ),
       ),

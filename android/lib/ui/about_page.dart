@@ -1,10 +1,56 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../theme/app_theme.dart';
+import '../update_check.dart';
+import '../version.dart';
 import 'widgets.dart';
 
 class AboutPage extends StatelessWidget {
   const AboutPage({super.key});
+
+  Future<void> _openUrl(BuildContext context, String url) async {
+    if (!await launchUrl(Uri.parse(url))) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('无法打开浏览器：$url')),
+      );
+    }
+  }
+
+  Future<void> _checkUpdate(BuildContext context) async {
+    final update = await checkForUpdate();
+    if (!context.mounted) return;
+    if (update == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('当前 v$appVersion 已是最新版本')),
+      );
+      return;
+    }
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('发现新版本 v${update.version}'),
+        content: Text(
+          '当前版本 v$appVersion。\n\n'
+          '${update.notes.isEmpty ? '请前往发布页下载新版本。' : update.notes}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('稍后'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('打开下载页'),
+          ),
+        ],
+      ),
+    );
+    if (open == true && context.mounted) {
+      await _openUrl(context, update.url);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +85,7 @@ class AboutPage extends StatelessWidget {
                 children: [
                   Text('3DS Live', style: theme.textTheme.titleLarge),
                   Text(
-                    'Android 端 · 0.1.12',
+                    'Android 端 · v$appVersion',
                     style: theme.textTheme.bodySmall
                         ?.copyWith(color: context.mutedColor),
                   ),
@@ -72,9 +118,30 @@ class AboutPage extends StatelessWidget {
             child: Column(
               children: [
                 SettingsRow(
+                  title: '当前版本',
+                  value: 'v$appVersion',
+                  onTap: () => _checkUpdate(context),
+                ),
+                Divider(height: 1, color: context.hairline),
+                SettingsRow(
+                  title: '检查更新',
+                  subtitle: '从 GitHub Releases 获取最新版本',
+                  onTap: () => _checkUpdate(context),
+                ),
+                Divider(height: 1, color: context.hairline),
+                SettingsRow(
                   title: '项目主页',
                   subtitle: 'github.com/nicedayzhu/3ds-live',
-                  onTap: () {},
+                  onTap: () => _openUrl(
+                    context,
+                    'https://github.com/nicedayzhu/3ds-live',
+                  ),
+                ),
+                Divider(height: 1, color: context.hairline),
+                SettingsRow(
+                  title: '发布页',
+                  subtitle: appReleasesUrl,
+                  onTap: () => _openUrl(context, appReleasesUrl),
                 ),
                 Divider(height: 1, color: context.hairline),
                 SettingsRow(

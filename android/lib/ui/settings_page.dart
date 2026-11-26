@@ -10,10 +10,12 @@ class SettingsPage extends StatelessWidget {
     super.key,
     required this.onToggleTheme,
     required this.themeMode,
+    this.showHeader = true,
   });
 
   final VoidCallback onToggleTheme;
   final ThemeMode themeMode;
+  final bool showHeader;
 
   @override
   Widget build(BuildContext context) {
@@ -28,10 +30,11 @@ class SettingsPage extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 8, 0, 32),
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(kPageGutter, 0, kPageGutter, 8),
-          child: Text('设置', style: theme.textTheme.headlineSmall),
-        ),
+        if (showHeader)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(kPageGutter, 0, kPageGutter, 8),
+            child: Text('设置', style: theme.textTheme.headlineSmall),
+          ),
         _Section(title: '网络', children: [
           SettingsRow(
             title: '监听端口',
