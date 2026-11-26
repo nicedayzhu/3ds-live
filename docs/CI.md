@@ -13,11 +13,10 @@ Windows 包就是这一标准版本。
 TensorRT 版依赖本机 CUDA/TensorRT 和为本机 GPU 生成的 plan，由本地构建：
 
 ```powershell
-pwsh -File scripts/build-pc-tensorrt.ps1 -SkipTests
+.\live\qt\build.ps1 -QtSdk .toolchains\qt\6.10.3\msvc2022_64 `
+  -Models D:\path\to\models `
+  -TensorRT -AccelerationDirectory D:\path\to\acceleration
 ```
-
-这个脚本固定使用本地 TensorRT、CUDA 和 `dist/Windows/runtime/acceleration`，不会影响
-GitHub Actions 的标准 DirectML 构建。
 
 需要 TensorRT 版本时联系作者 [@nicedayzhu](https://github.com/nicedayzhu)，不通过
 GitHub Actions 发布第二包。
