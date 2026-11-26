@@ -2,6 +2,7 @@
 #include "live_config.h"
 #include "live_net_report.h"
 #include "live_audio_sender.h"
+#include "live_control.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -1244,48 +1245,91 @@ static void apply_screen_mask_locked(u32 mask)
 	rowBase = rowCandidate = NULL;
 }
 
-/*
- * R16C/R6CF/R10C carry fps, rate, combined-FEC and (from R16C v2) the panel
- * mask. Parsing is separated from control() so the wire validation stays in
- * one place and the caller only has to decide whether the packet was ours.
- */
-static bool handle_stream_config(const u8 *msg, int n, u64 now)
+static void control_configure(const struct live_control_config *config, u64 now)
 {
-	bool quality_config = n >= 28 && n <= 32 && !memcmp(msg, "R16C", 4);
-	bool legacy_config = n == 20 && !memcmp(msg, "R6CF", 4);
-	bool budget_config = n == 24 && !memcmp(msg, "R10C", 4);
-	u32 seq, hz, bps, requested_mask;
-	bool next_combined;
-	unsigned target_q;
-
-	if (!quality_config && !legacy_config && !budget_config)
-		return false;
-
-	seq = get32(msg + 8);
-	hz = get32(msg + 12);
-	bps = get32(msg + 16);
-	next_combined = n >= 24 ? get32(msg + 20) != 0 : combinedFec;
-	target_q = live_config_jpeg_target(msg, n, qualityTarget);
-	requested_mask = n >= 32 ? get32(msg + 28) : screenMask;
-	if (requested_mask < 1 || requested_mask > 3)
-		requested_mask = screenMask;
-	if (!live_valid_fps(hz) || bps < LIVE_MIN_RATE || bps > LIVE_MAX_RATE ||
-	    !seq || !live_valid_quality_target(target_q))
-		return true;
-	if (n >= 24 && get32(msg + 20) > 1)
-		return true;
-	if (configSequence && (u32)(seq - configSequence) >= 0x80000000u)
-		return true;
+	if (configSequence &&
+	    (u32)(config->sequence - configSequence) >= 0x80000000u)
+		return;
 
 	peer_activity(now);
-	configSequence = seq;
+	configSequence = config->sequence;
 	LightLock_Lock(&lock);
-	apply_screen_mask_locked(requested_mask);
-	configure_stream(hz, bps, next_combined, target_q);
+	apply_screen_mask_locked(config->mask);
+	configure_stream(config->fps, config->rate, config->combined_fec,
+			 config->quality);
 	LightLock_Unlock(&lock);
 	lastStatusTick = 0;
-	return true;
 }
+
+static void control_set_mask(u32 mask, u64 now)
+{
+	peer_activity(now);
+	LightLock_Lock(&lock);
+	apply_screen_mask_locked(mask);
+	LightLock_Unlock(&lock);
+}
+
+static void control_set_pacing(unsigned mode, u64 now)
+{
+	if (pacingMode != mode) {
+		pacingMode = mode;
+		lastStatusTick = 0;
+	}
+	peer_activity(now);
+}
+
+static void control_ack_r20(u64 now)
+{
+	if (!rowBanks || !compactJpeg || !combinedFec)
+		return;
+	LightLock_Lock(&lock);
+	r20LastAck = now;
+	LightLock_Unlock(&lock);
+	peer_activity(now);
+}
+
+static void control_repair_peer(u64 now)
+{
+	repairPeerAt = now;
+	peer_activity(now);
+}
+
+static void control_ack_rows(u32 flags, u32 sequence, u64 now)
+{
+	if (!rowBanks || !compactJpeg)
+		return;
+
+	rowLastAck = now;
+	peer_activity(now);
+	LightLock_Lock(&lock);
+	row_peer(true, !flags);
+	if (flags && rowCandidate && rowCandidate->seq == sequence) {
+		rowBase = rowCandidate;
+		rowCandidate = NULL;
+		rowProbe = NULL;
+		rowAcks++;
+	}
+	LightLock_Unlock(&lock);
+}
+
+static void control_feedback(u32 sent, u32 transit, u64 now)
+{
+	peer_activity(now);
+	feedbackCount++;
+	live_receiver_observe(&receiverFeedback, sent, transit, now,
+			      (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11);
+}
+
+static const struct live_control_ops control_ops = {
+    .configure = control_configure,
+    .set_mask = control_set_mask,
+    .set_pacing = control_set_pacing,
+    .ack_r20 = control_ack_r20,
+    .repair_peer = control_repair_peer,
+    .repair_request = accept_repair,
+    .ack_rows = control_ack_rows,
+    .feedback = control_feedback,
+};
 
 static void control(u64 *due)
 {
@@ -1376,74 +1420,9 @@ static void control(u64 *due)
 			if (!mediaReady ||
 			    from.sin_addr.s_addr != target.sin_addr.s_addr)
 				continue;
-			if (n == 16 && !memcmp(msg, "R21C", 4) &&
-			    get32(msg + 8) == 1 && get32(msg + 12) <= 1) {
-				unsigned requested = get32(msg + 12);
-				if (pacingMode != requested) {
-					pacingMode = requested;
-					lastStatusTick = 0;
-				}
-				peer_activity(now);
-				continue;
-			}
-			if (rowBanks && compactJpeg && combinedFec && n == 12 &&
-			    !memcmp(msg, "R20A", 4) && get32(msg + 8) == 1) {
-				LightLock_Lock(&lock);
-				r20LastAck = now;
-				LightLock_Unlock(&lock);
-				peer_activity(now);
-				continue;
-			}
-			if (n == 12 && !memcmp(msg, "R23C", 4)) {
-				u32 mask = get32(msg + 8);
-				if (mask >= 1 && mask <= 3) {
-					peer_activity(now);
-					LightLock_Lock(&lock);
-					apply_screen_mask_locked(mask);
-					LightLock_Unlock(&lock);
-				}
-				continue;
-			}
-			if (n == 12 && !memcmp(msg, "R19A", 4) &&
-			    get32(msg + 8) == 1) {
-				repairPeerAt = now;
-				peer_activity(now);
-				continue;
-			}
-			if (n >= 4 && !memcmp(msg, "R19N", 4)) {
-				accept_repair(msg, n, now);
-				continue;
-			}
-			if (rowBanks && compactJpeg && n == 16 &&
-			    !memcmp(msg, "R17A", 4)) {
-				u32 flags = get32(msg + 8),
-				    seq = get32(msg + 12);
-				if (flags > 1 || (!flags && seq))
-					continue;
-				rowLastAck = now;
-				peer_activity(now);
-				LightLock_Lock(&lock);
-				row_peer(true, !flags);
-				if (flags && rowCandidate &&
-				    rowCandidate->seq == seq) {
-					rowBase = rowCandidate;
-					rowCandidate = NULL;
-					rowProbe = NULL;
-					rowAcks++;
-				}
-				LightLock_Unlock(&lock);
-				continue;
-			}
-			if (n == 28 && !memcmp(msg, "R3FB", 4)) {
-				peer_activity(now);
-				feedbackCount++;
-				live_receiver_observe(
-				    &receiverFeedback, get32(msg + 8),
-				    get32(msg + 16), now,
-				    (u64)LIVE_PEER_LEASE_SECONDS *
-					SYSCLOCK_ARM11);
-			}
-			handle_stream_config(msg, n, now);
+			live_control_handle(msg, n, now, screenMask,
+					    combinedFec, qualityTarget,
+					    &control_ops);
 		}
 		const bool hasVideo = live_receiver_recent(
 		    &receiverFeedback, now,
