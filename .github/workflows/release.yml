@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +20,7 @@ concurrency:
 
 env:
   SEED_TAG: v0.1.13
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build-3ds:
@@ -24,6 +31,8 @@ jobs:
       options: --user root
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Install libctru and tools
         run: |
           apt-get update && apt-get install -y python3-pil
@@ -57,6 +66,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
@@ -92,6 +103,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -124,6 +137,8 @@ jobs:
     needs: [build-3ds, build-windows]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: 3ds
@@ -157,6 +172,8 @@ jobs:
     needs: [bundle, build-android]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           name: bundle
@@ -168,7 +185,7 @@ jobs:
       - name: Prepare checksums and notes
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           test "$version" = "$(tr -d '[:space:]' < VERSION)"
           cd release
           sha256sum 3DS-Live-*-Windows-x64-New3DS.zip \
@@ -206,7 +223,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release/* --clobber
             gh release edit "$tag" --title "3DS Live ${tag#v}" --notes-file release/notes.md
