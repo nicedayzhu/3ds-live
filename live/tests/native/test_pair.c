@@ -26,15 +26,15 @@ int main(void) {
     const uint8_t r6[20]="R6CF",r10[24]="R10C";
     uint8_t r16[28]="R16C";
     assert(live_config_jpeg_target(r6,sizeof r6,80)==80);
-    assert(live_config_jpeg_target(r10,sizeof r10,70)==70);
+    assert(live_config_jpeg_target(r10,sizeof r10,20)==20);
     assert(live_config_jpeg_target(r16,sizeof r16,80)==0);
-    r16[24]=70;
-    assert(live_config_jpeg_target(r16,sizeof r16,0)==70);
+    r16[24]=20;
+    assert(live_config_jpeg_target(r16,sizeof r16,0)==20);
     r16[25]=1;
     assert(!live_valid_quality_target(live_config_jpeg_target(r16,sizeof r16,0)));
     for(unsigned q=0;q<=100;q++)
-        assert(live_valid_quality_target(q)==(q==0||q==40||q==60||q==70||q==80));
-    const unsigned manual_targets[]={40,60,70,80};
+        assert(live_valid_quality_target(q)==(q==0||q==15||q==20||q==25||q==30||q==35||q==40||q==50||q==60||q==70||q==80));
+    const unsigned manual_targets[]={20,40,60,80};
     for(unsigned ri=0;ri<sizeof rates/sizeof rates[0];ri++)for(unsigned fi=0;fi<4;fi++) {
         uint32_t video=rates[ri],fps=frame_rates[fi];
         for(int combined=0;combined<=1;combined++) {
