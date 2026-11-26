@@ -287,7 +287,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         return (o.ip.isEmpty() ? QString("正在发现同一局域网内的 3DS") : QString("等待掌机 %1").arg(o.ip))
                + QString(" · UDP %1\n在掌机上按 R + SELECT").arg(o.port);
     };
-    void *view = createView({{"title", QStringLiteral("3DS Live · v%1").arg(QCoreApplication::applicationVersion())},
+    void *view = createView({{"title", "3DS Live"},
                              {"notice", waitingNotice()},
                              {"ip", o.ip},
                              {"scale", o.scale},

@@ -1023,11 +1023,18 @@ class Viewer final : public QWidget {
         openFile->setEnabled(false);
         openFolder->setEnabled(false);
         menu->addSeparator();
-        auto *versionInfo = menu->addAction(
-            QStringLiteral("3DS Live v%1").arg(QCoreApplication::applicationVersion()));
-        versionInfo->setObjectName("versionInfo");
-        versionInfo->setEnabled(false);
-        action(menu, "查看发布页…", {}, [] {
+        auto *help = submenu("帮助", "helpMenu");
+        action(help, "关于 3DS Live…", {}, [this] {
+            QMessageBox::about(
+                this, QStringLiteral("关于 3DS Live"),
+                QStringLiteral("<h3>3DS Live</h3>"
+                               "<p>版本 v%1</p>"
+                               "<p>New 3DS 无线双屏投屏接收端。</p>"
+                               "<p><a href=\"https://github.com/nicedayzhu/3ds-live\">"
+                               "github.com/nicedayzhu/3ds-live</a></p>")
+                    .arg(QCoreApplication::applicationVersion()));
+        });
+        action(help, "查看发布页…", {}, [] {
             QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/nicedayzhu/3ds-live/releases")));
         });
         menu->addSeparator();
