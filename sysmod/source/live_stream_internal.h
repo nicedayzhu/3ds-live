@@ -159,5 +159,13 @@ void live_stream_discard_pending(unsigned slot, LiveTimingOutcome why);
 u32 live_stream_pair_budget(u32 byte_rate, u32 hz, bool combined,
 			    unsigned target_q);
 void live_stream_configure(u32 hz, u32 bps, bool fec, unsigned target_q);
+void encoder(void *arg);
+void control(u64 *due);
+void poll_frame_feedback(u64 now);
+void send_audio(u64 *due);
+void pacing_sleep_until(u64 due);
+void pacing_charge(u64 *due, u64 begin, u64 returned, u32 wire,
+		   enum LivePacketKind kind);
+void sender(void *arg);
 
 #endif /* LIVE_STREAM_INTERNAL_H */
