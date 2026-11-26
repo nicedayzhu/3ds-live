@@ -1023,6 +1023,14 @@ class Viewer final : public QWidget {
         openFile->setEnabled(false);
         openFolder->setEnabled(false);
         menu->addSeparator();
+        auto *versionInfo = menu->addAction(
+            QStringLiteral("3DS Live v%1").arg(QCoreApplication::applicationVersion()));
+        versionInfo->setObjectName("versionInfo");
+        versionInfo->setEnabled(false);
+        action(menu, "查看发布页…", {}, [] {
+            QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/nicedayzhu/3ds-live/releases")));
+        });
+        menu->addSeparator();
         action(menu, "投屏设置…", QKeySequence("Ctrl+,"), [this] { openSettings(StreamTab); });
         auto *diagnostics = submenu("性能诊断", "diagnosticsMenu");
         action(diagnostics, "性能详情", Qt::Key_F12, [this] { showDebug(); });

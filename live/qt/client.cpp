@@ -8,6 +8,10 @@
 #include "model_check.h"
 #include "effect_load.h"
 #include <QtWidgets>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QVersionNumber>
+#include <QJsonDocument>
 using namespace live;
 static const QMap<QString, QString> labels = {{"off", "原始"},
                                               {"clean", "轻度增强"},
@@ -18,6 +22,46 @@ static const QMap<QString, QString> labels = {{"off", "原始"},
                                               {"gpu", "DnCNN 降噪"},
                                               {"sr", "Real-ESRGAN 2× 超分"},
                                               {"span", "2× 实时超分 · SPAN"}};
+static bool newerVersion(const QString &candidate)
+{
+    const auto current = QVersionNumber::fromString(QCoreApplication::applicationVersion());
+    const auto latest = QVersionNumber::fromString(candidate);
+    return !latest.isNull() && QVersionNumber::compare(latest, current) > 0;
+}
+
+static void checkForUpdates(QWidget *parent)
+{
+    auto *manager = new QNetworkAccessManager(parent);
+    QNetworkRequest request(QUrl(QStringLiteral("https://api.github.com/repos/nicedayzhu/3ds-live/releases/latest")));
+    request.setRawHeader("User-Agent", "3DS-Live-Desktop/" + QCoreApplication::applicationVersion().toUtf8());
+    request.setRawHeader("Accept", "application/vnd.github+json");
+    request.setTransferTimeout(6000);
+    auto *reply = manager->get(request);
+    QObject::connect(reply, &QNetworkReply::finished, parent, [parent, reply] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+            return;
+        const auto data = QJsonDocument::fromJson(reply->readAll()).object();
+        auto tag = data.value("tag_name").toString().trimmed();
+        if (tag.startsWith('v') || tag.startsWith('V'))
+            tag.remove(0, 1);
+        if (tag.isEmpty() || !newerVersion(tag))
+            return;
+        const auto url = data.value("html_url").toString().trimmed();
+        QMessageBox box(parent);
+        box.setWindowTitle(QStringLiteral("发现新版本"));
+        box.setIcon(QMessageBox::Information);
+        box.setText(QStringLiteral("发现 3DS Live v%1（当前 v%2）。")
+                        .arg(tag, QCoreApplication::applicationVersion()));
+        box.setInformativeText(QStringLiteral("是否打开 GitHub Releases 下载新版本？"));
+        auto *open = box.addButton(QStringLiteral("打开下载页"), QMessageBox::AcceptRole);
+        box.addButton(QStringLiteral("稍后"), QMessageBox::RejectRole);
+        box.exec();
+        if (box.clickedButton() == open)
+            QDesktopServices::openUrl(url.isEmpty() ? QUrl(QStringLiteral("https://github.com/nicedayzhu/3ds-live/releases")) : QUrl(url));
+    });
+}
+
 struct Options {
     QString ip, mode = "off", motion = "off", rifePrecision = "fp32", record, rtsp, stats, models,
         layout = "stacked";
@@ -243,7 +287,7 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
         return (o.ip.isEmpty() ? QString("正在发现同一局域网内的 3DS") : QString("等待掌机 %1").arg(o.ip))
                + QString(" · UDP %1\n在掌机上按 R + SELECT").arg(o.port);
     };
-    void *view = createView({{"title", "3DS Live"},
+    void *view = createView({{"title", QStringLiteral("3DS Live · v%1").arg(QCoreApplication::applicationVersion())},
                              {"notice", waitingNotice()},
                              {"ip", o.ip},
                              {"scale", o.scale},
@@ -261,6 +305,9 @@ int runClient(QApplication &app, quint16 handheldDiscoveryPort) {
                              {"motion", true},
                              {"record", true},
                              {"debug", o.debug}});
+    QTimer::singleShot(2500, static_cast<QWidget *>(view), [view] {
+        checkForUpdates(static_cast<QWidget *>(view));
+    });
     auto options = [&](int mask, int max) {
         QJsonArray caps, speeds;
         for (int r : rates())
