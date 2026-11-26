@@ -27,11 +27,15 @@ jobs:
       - name: Install libctru and tools
         run: |
           dkp-pacman -Syu --noconfirm
-          dkp-pacman -S --noconfirm 3ds-dev
-          dkp-pacman -S --noconfirm makerom 3dstools bannertool || {
-            dkp-pacman -Ss 'makerom|3dstools|bannertool' || true
-            exit 1
-          }
+          dkp-pacman -S --noconfirm 3ds-dev 3dstools
+          curl -fsSL -o /tmp/makerom.zip \
+            https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip
+          unzip -q /tmp/makerom.zip -d /tmp/makerom
+          install -m 0755 /tmp/makerom/makerom /usr/local/bin/makerom
+          curl -fsSL -o /tmp/bannertool.tar.gz \
+            https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3-linux.tar.gz
+          tar -xzf /tmp/bannertool.tar.gz -C /tmp
+          install -m 0755 /tmp/bannertool-1.2.3-linux/bannertool /usr/local/bin/bannertool
       - name: Build
         run: |
           export DEVKITPRO=/opt/devkitpro
