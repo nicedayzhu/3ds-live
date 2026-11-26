@@ -45,7 +45,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install libctru and 3DS tools
         run: |
-          dkp-pacman -Syu --noconfirm
+          for attempt in 1 2 3 4 5; do
+            dkp-pacman -Syu --noconfirm && break
+            sleep 5
+          done
           dkp-pacman -S --noconfirm 3ds-dev 3dstools
           apt-get update && apt-get install -y python3-pil
           curl -fsSL -o /tmp/makerom.zip \
