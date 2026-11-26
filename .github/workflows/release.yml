@@ -19,7 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SEED_TAG: v0.1.12
+  # Windows build input; this release must keep a Windows zip with runtime/models.
+  SEED_TAG: v0.1.13
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
