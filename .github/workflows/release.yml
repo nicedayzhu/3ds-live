@@ -28,6 +28,7 @@ jobs:
         run: |
           dkp-pacman -Syu --noconfirm
           dkp-pacman -S --noconfirm 3ds-dev 3dstools
+          apt-get update && apt-get install -y python3-pil
           curl -fsSL -o /tmp/makerom.zip \
             https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
           unzip -q /tmp/makerom.zip -d /tmp/makerom
