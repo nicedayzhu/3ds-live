@@ -1,4 +1,5 @@
 #include "live_stream.h"
+#include "live_config.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -192,55 +193,35 @@ void live_set_capture_paused(bool paused)
 }
 bool live_requested(void)
 {
+	struct live_config config;
+
 	if (worker)
 		return enabled;
-	enabled = true;
-	compactJpeg = true;
-	audioEnabled = true;
-	combinedFec = true;
-	fps = 30;
-	rate = 800000;
-	FILE *f = fopen("sdmc:/3ds/3ds-live/live.ini", "r");
-	char line[128], ip[64] = "auto";
-	unsigned port = 8001;
-	while (f && fgets(line, sizeof line, f)) {
-		char key[40], val[64];
-		if (sscanf(line, "%39[^=]=%63s", key, val) != 2)
-			continue;
-		if (!strcmp(key, "enabled"))
-			enabled = !strcmp(val, "on");
-		else if (!strcmp(key, "host"))
-			snprintf(ip, sizeof ip, "%s", val);
-		else if (!strcmp(key, "port"))
-			port = live_config_port(val);
-		else if (!strcmp(key, "fps"))
-			fps = live_migrate_fps((u32)strtoul(val, NULL, 10));
-		else if (!strcmp(key, "bytes_per_second"))
-			rate = (u32)strtoul(val, NULL, 10);
-		else if (!strcmp(key, "compact_jpeg"))
-			compactJpeg = !strcmp(val, "on");
-		else if (!strcmp(key, "audio"))
-			audioEnabled = strcmp(val, "off") != 0;
-		else if (!strcmp(key, "combined_fec"))
-			combinedFec = !strcmp(val, "on");
-	}
-	if (f)
-		fclose(f);
-	memset(&target, 0, sizeof target);
+
+	if (!live_config_load(&config, LIVE_CONFIG_PATH))
+		return false;
+
+	enabled = config.enabled;
+	compactJpeg = config.compact_jpeg;
+	audioEnabled = config.audio_enabled;
+	combinedFec = config.combined_fec;
+	fps = config.fps;
+	rate = config.rate;
+
+	memset(&target, 0, sizeof(target));
 	target.sin_family = AF_INET;
-	automaticHost = !strcmp(ip, "auto");
+	automaticHost = config.automatic_host;
 	if (!automaticHost &&
-	    (inet_pton(AF_INET, ip, &target.sin_addr) != 1 ||
-	     !live_unicast_address(ntohl(target.sin_addr.s_addr))))
+	    inet_pton(AF_INET, config.host, &target.sin_addr) != 1)
 		enabled = false;
-	if (port < 1 || port > 65535)
+	target.sin_port = htons(config.port);
+
+	if (!live_config_valid(&config))
 		enabled = false;
-	target.sin_port = htons((u16)port);
-	if (!live_valid_fps(fps) || rate < LIVE_MIN_RATE ||
-	    rate > LIVE_MAX_RATE)
-		enabled = false;
+
 	return enabled;
 }
+
 u32 live_fps(void)
 {
 	return __atomic_load_n(&fps, __ATOMIC_RELAXED);
