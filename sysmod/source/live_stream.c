@@ -1,4 +1,5 @@
 #include "live_stream.h"
+#include "live_stream_internal.h"
 #include "live_config.h"
 #include "live_net_report.h"
 #include "live_audio_sender.h"
@@ -35,128 +36,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define MAX_JPEG LIVE_JPEG_MAX_BYTES
-
-/* Encoder 0 coordinates stream.counters.pairs, encoder 1 handles bottom. The
- * socket stream.runtime.worker owns the socket and claims queued
- * stream.counters.pairs in capture order. */
-struct stream_counters {
-	u32 attempts[2], jpeg_frames[2], max_us[2], max_bytes[2];
-	u32 convert_count[2], convert_max_us[2];
-	u64 sum_us[2], convert_sum_us[2], changed_mcus[2], converted_mcus[2];
-	u64 snapshot_sum_us;
-	u32 snapshot_count, snapshot_max_us;
-	u32 source_reuse[2], last_source[2], frames[2];
-	u32 replaced, errors, expired, oversize, retries, pairs;
-	u32 send_calls, send_max_us, last_encode_us[2];
-	u32 feedback_count, config_changes, rate_pending_kept,
-	    rate_encoding_kept;
-	u64 send_sum_us, video_wire_bytes, compact_saved_bytes;
-	u32 compact_frames, compact_fallbacks;
-	u32 manual_render_failures, manual_wire_drops;
-};
-struct stream_settings {
-	bool enabled;
-	bool compact_jpeg;
-	bool audio_enabled;
-	bool combined_fec;
-	u32 fps;
-	u32 rate;
-	u32 config_epoch;
-	u32 config_sequence;
-	unsigned quality_target;
-	unsigned quality;
-	unsigned spare;
-	u32 screen_mask;
-	unsigned pacing_mode;
-};
-struct stream_buffers {
-	LiveJpegSource *raw_sources[2];
-	LiveJpegFrame *raw_working[2];
-	size_t raw_bytes[2];
-	_Alignas(LZ4_stream_t) u8 encoded[2][MAX_JPEG];
-	u8 pending_bytes[2 * MAX_JPEG];
-	u8 send_arena[2 * MAX_JPEG];
-};
-
-struct stream_runtime {
-	bool raw_valid[2];
-	bool soc_ready;
-	bool receiver_video;
-	bool capture_paused;
-	volatile bool stopping;
-	u32 raw_pts[2];
-	u32 plan_pts[2];
-	u32 plan_stamp;
-	u32 plan_mask;
-	u32 sequence;
-	u32 session;
-	u64 started;
-	LightLock lock;
-	LightLock raw_locks[2];
-	LightEvent events[3];
-	Thread worker;
-	Thread encoders[2];
-	s32 encoder_cores[2];
-	u32 job_kind;
-	u32 job_quality;
-	u32 job_done;
-	u32 job_size[2];
-	u32 job_changed[2];
-	u32 job_us[2];
-	LivePayloadControl payload_control;
-	LivePacketReport packet_report;
-	u64 last_status_tick;
-	u64 last_control_tick;
-	u64 send_active_ticks;
-	u32 repair_requests;
-	u64 repair_interest;
-	u64 repair_peer_at;
-	u64 last_repair_poll;
-	LiveReceiverFeedback receiver_feedback;
-	int last_errno;
-};
-
-struct row_state {
-	struct row_anchor *banks;
-	struct row_anchor *base;
-	struct row_anchor *candidate;
-	struct row_anchor *probe;
-	LiveRowTrial trial;
-	u64 probe_after;
-	bool enabled;
-	unsigned sends;
-	u64 last_key;
-	u64 last_ack;
-	u64 bytes_saved;
-	u32 keys;
-	u32 repeats;
-	u32 deltas;
-	u32 acks;
-};
-
-struct control_state {
-	int deferred_size;
-	struct sockaddr_in deferred_from;
-	u8 deferred_bytes[64];
-};
-
-struct live_stream {
-	struct stream_buffers buffers;
-	struct row_state row;
-	struct control_state control;
-	struct stream_runtime runtime;
-	struct stream_settings settings;
-	struct stream_counters counters;
-	struct live_net net;
-	struct live_audio_sender audio;
-	struct live_r20 r20;
-	struct live_repair_tx repair_tx;
-	LiveRepairHistory repair_history;
-	LivePendingQueue pending;
-};
-
-static struct live_stream stream = {
+struct live_stream stream = {
     .settings =
 	{
 	    .fps = 30,
@@ -191,17 +71,17 @@ static void put32(u8 *p, u32 n)
 	for (unsigned i = 0; i < 4; i++)
 		p[i] = (u8)(n >> (8 * i));
 }
-static bool stopped(void)
+bool live_stream_stopped(void)
 {
 	return __atomic_load_n(&stream.runtime.stopping, __ATOMIC_ACQUIRE);
 }
-static bool capture_paused(void)
+bool live_stream_capture_paused(void)
 {
 	return __atomic_load_n(&stream.runtime.capture_paused,
 			       __ATOMIC_ACQUIRE);
 }
 
-static void discard_pending(unsigned slot, LiveTimingOutcome why)
+void live_stream_discard_pending(unsigned slot, LiveTimingOutcome why)
 {
 	(void)why;
 	live_timing_drop_pending(slot, why);
@@ -211,13 +91,14 @@ static void discard_pending(unsigned slot, LiveTimingOutcome why)
 static void clear_pending(void)
 {
 	while (stream.pending.count)
-		discard_pending(stream.pending.head, TIMING_RECONFIGURED);
+		live_stream_discard_pending(stream.pending.head,
+					    TIMING_RECONFIGURED);
 }
 
 void live_set_capture_paused(bool paused)
 {
 	LightLock_Lock(&stream.runtime.lock);
-	if (paused && !capture_paused()) {
+	if (paused && !live_stream_capture_paused()) {
 		// Reject a JPEG still being stream.buffers.encoded and forget
 		// the previous display plan.
 		++stream.settings.config_epoch;
@@ -265,13 +146,14 @@ u32 live_fps(void)
 }
 bool live_peer_ready(void)
 {
-	return !stopped() &&
+	return !live_stream_stopped() &&
 	       __atomic_load_n(&stream.net.media_ready, __ATOMIC_ACQUIRE);
 }
 bool live_receiver_has_video(void)
 {
-	return !stopped() && __atomic_load_n(&stream.runtime.receiver_video,
-					     __ATOMIC_ACQUIRE);
+	return !live_stream_stopped() &&
+	       __atomic_load_n(&stream.runtime.receiver_video,
+			       __ATOMIC_ACQUIRE);
 }
 u32 live_encoded_frames(unsigned sc)
 {
@@ -282,7 +164,7 @@ u32 live_encoded_frames(unsigned sc)
 bool live_audio_active(void)
 {
 	return stream.settings.audio_enabled && stream.runtime.worker &&
-	       !stopped() && !capture_paused();
+	       !live_stream_stopped() && !live_stream_capture_paused();
 }
 bool live_audio_submit(const s16 *pcm, u32 pts)
 {
@@ -316,14 +198,14 @@ static bool run_single_job(unsigned kind, unsigned q, unsigned sc)
 	stream.runtime.job_quality = q;
 	if (sc == 0) {
 		encode_job(0, kind, q);
-		return !stopped();
+		return !live_stream_stopped();
 	}
 	__atomic_store_n(&stream.runtime.job_done, 0, __ATOMIC_RELEASE);
 	LightEvent_Signal(&stream.runtime.events[1]);
 	while (!__atomic_load_n(&stream.runtime.job_done, __ATOMIC_ACQUIRE) &&
-	       !stopped())
+	       !live_stream_stopped())
 		LightEvent_WaitTimeout(&stream.runtime.events[2], 1000000);
-	return !stopped();
+	return !live_stream_stopped();
 }
 
 static bool run_pair_job(unsigned kind, unsigned q)
@@ -334,9 +216,9 @@ static bool run_pair_job(unsigned kind, unsigned q)
 	LightEvent_Signal(&stream.runtime.events[1]);
 	encode_job(0, kind, q);
 	while (!__atomic_load_n(&stream.runtime.job_done, __ATOMIC_ACQUIRE) &&
-	       !stopped())
+	       !live_stream_stopped())
 		LightEvent_WaitTimeout(&stream.runtime.events[2], 1000000);
-	return !stopped();
+	return !live_stream_stopped();
 }
 static u32 payload_size(unsigned screen, unsigned q, bool combined)
 {
@@ -550,8 +432,8 @@ static void publish_rows(const struct row_pair_plan *plan,
 	}
 }
 
-static u32 pair_payload_budget(u32 byteRate, u32 hz, bool combined,
-			       unsigned targetQ)
+u32 live_stream_pair_budget(u32 byteRate, u32 hz, bool combined,
+			    unsigned targetQ)
 {
 	u32 videoRate =
 	    live_av_video_rate(byteRate, stream.settings.audio_enabled);
@@ -561,7 +443,7 @@ static u32 pair_payload_budget(u32 byteRate, u32 hz, bool combined,
 /* Called by the network thread with stream.runtime.lock held, between frame
  * sends. A byte ceiling changes the allowable JPEG size, not the meaning of its
  * fragments. */
-static void configure_stream(u32 hz, u32 bps, bool fec, unsigned targetQ)
+void live_stream_configure(u32 hz, u32 bps, bool fec, unsigned targetQ)
 {
 	bool formatChanged = stream.settings.fps != hz ||
 			     stream.settings.combined_fec != fec ||
@@ -575,14 +457,14 @@ static void configure_stream(u32 hz, u32 bps, bool fec, unsigned targetQ)
 		live_repair_clear(&stream.repair_history);
 		stream.repair_tx.credit = 0;
 	}
-	u32 budget = pair_payload_budget(bps, hz, fec, targetQ);
+	u32 budget = live_stream_pair_budget(bps, hz, fec, targetQ);
 	unsigned count = stream.pending.count, head = stream.pending.head;
 	for (unsigned i = 0; i < count; i++) {
 		unsigned slot = head ^ i;
 		if (!live_pending_compatible(&stream.pending.slots[slot],
 					     stream.settings.config_epoch,
 					     budget))
-			discard_pending(slot, TIMING_RECONFIGURED);
+			live_stream_discard_pending(slot, TIMING_RECONFIGURED);
 		else
 			stream.counters.rate_pending_kept++;
 	}
@@ -649,7 +531,8 @@ static void encode_single_screen(u32 seq, u32 stamp, u32 epoch, u32 budget,
 	bytes = live_pending_bytes(&incoming);
 	while (!live_pending_fits(&stream.pending, bytes,
 				  sizeof stream.buffers.pending_bytes)) {
-		discard_pending(stream.pending.head, TIMING_REPLACED);
+		live_stream_discard_pending(stream.pending.head,
+					    TIMING_REPLACED);
 		stream.counters.replaced++;
 	}
 	slot =
@@ -682,8 +565,8 @@ static bool pair_requantize(struct pair_encode *e, struct row_pair_plan *plan,
 		LightLock_Unlock(&stream.runtime.lock);
 		if (current_rate != e->job_rate) {
 			e->job_rate = current_rate;
-			budget = pair_payload_budget(e->job_rate, e->job_fps,
-						     e->combined, e->target_q);
+			budget = live_stream_pair_budget(
+			    e->job_rate, e->job_fps, e->combined, e->target_q);
 			target_bytes = budget *
 				       stream.runtime.payload_control.percent /
 				       100;
@@ -700,7 +583,7 @@ static bool pair_requantize(struct pair_encode *e, struct row_pair_plan *plan,
 			break;
 		next_q =
 		    live_retry_quality(e->target_q, q, retry, total, budget);
-		if (next_q == q || capture_paused())
+		if (next_q == q || live_stream_capture_paused())
 			break;
 		stream.counters.retries++;
 		q = next_q;
@@ -708,7 +591,7 @@ static bool pair_requantize(struct pair_encode *e, struct row_pair_plan *plan,
 			break;
 		live_timing_encoded();
 	}
-	if (stopped())
+	if (live_stream_stopped())
 		return false;
 	*q_out = q;
 	*budget_out = budget;
@@ -774,8 +657,8 @@ static void pair_publish(struct pair_encode *e, struct row_pair_plan *plan,
 		}
 	}
 	LightLock_Lock(&stream.runtime.lock);
-	current_budget = pair_payload_budget(stream.settings.rate, e->job_fps,
-					     e->combined, e->target_q);
+	current_budget = live_stream_pair_budget(
+	    stream.settings.rate, e->job_fps, e->combined, e->target_q);
 	if (plan->bottom_compressed &&
 	    !live_r20_recent(&stream.r20, svcGetSystemTick())) {
 		plan->bottom_compressed = NULL;
@@ -813,7 +696,8 @@ static void pair_publish(struct pair_encode *e, struct row_pair_plan *plan,
 		while (
 		    !live_pending_fits(&stream.pending, bytes,
 				       sizeof stream.buffers.pending_bytes)) {
-			discard_pending(stream.pending.head, TIMING_REPLACED);
+			live_stream_discard_pending(stream.pending.head,
+						    TIMING_REPLACED);
 			stream.counters.replaced++;
 		}
 		live_payload_observe(&stream.runtime.payload_control,
@@ -855,9 +739,9 @@ static void encode_pair(struct pair_encode *e)
 
 static void encoder_bottom_worker(void)
 {
-	while (!stopped()) {
+	while (!live_stream_stopped()) {
 		LightEvent_WaitTimeout(&stream.runtime.events[1], 100000000);
-		if (stopped())
+		if (live_stream_stopped())
 			break;
 		if (__atomic_load_n(&stream.runtime.job_done, __ATOMIC_ACQUIRE))
 			continue;
@@ -941,8 +825,8 @@ static void encoder(void *arg)
 	LiveConsumedPlan consumed = {0};
 	u32 budgetEpoch = 0, budgetRate = 0;
 	unsigned previousTarget = 0;
-	while (!stopped()) {
-		if (!live_peer_ready() || capture_paused()) {
+	while (!live_stream_stopped()) {
+		if (!live_peer_ready() || live_stream_capture_paused()) {
 			svcSleepThread(10000000);
 			continue;
 		}
@@ -960,7 +844,7 @@ static void encoder(void *arg)
 					       1000000);
 			continue;
 		}
-		if (stopped())
+		if (live_stream_stopped())
 			break;
 		u64 snapshot_begin = svcGetSystemTick();
 
@@ -988,7 +872,7 @@ static void encoder(void *arg)
 		next = live_next_encode_tick(next, now, SYSCLOCK_ARM11, jobFps);
 		const u32 initialRate = jobRate;
 		u32 budget =
-		    pair_payload_budget(jobRate, jobFps, combined, targetQ);
+		    live_stream_pair_budget(jobRate, jobFps, combined, targetQ);
 		if (budgetEpoch != epoch || budgetRate != jobRate) {
 			stream.runtime.payload_control =
 			    (LivePayloadControl){.percent = 100};
@@ -1079,10 +963,10 @@ static void audio_pacing_charge(u64 *due, u64 begin, u64 returned, u32 wire,
 
 static void send_audio(u64 *due)
 {
-	live_audio_sender_send(&stream.audio, stream.runtime.session,
-			       stream.settings.audio_enabled, stopped(),
-			       stream.net.fd, &stream.net.target, due,
-			       pacing_sleep_until, audio_pacing_charge);
+	live_audio_sender_send(
+	    &stream.audio, stream.runtime.session,
+	    stream.settings.audio_enabled, live_stream_stopped(), stream.net.fd,
+	    &stream.net.target, due, pacing_sleep_until, audio_pacing_charge);
 }
 
 static size_t network_report_text(char *text, size_t capacity)
@@ -1231,7 +1115,8 @@ static void apply_screen_mask_locked(u32 mask)
 
 	stream.settings.screen_mask = mask;
 	while (stream.pending.count)
-		discard_pending(stream.pending.head, TIMING_RECONFIGURED);
+		live_stream_discard_pending(stream.pending.head,
+					    TIMING_RECONFIGURED);
 	stream.row.base = stream.row.candidate = NULL;
 }
 
@@ -1246,8 +1131,8 @@ static void control_configure(const struct live_control_config *config, u64 now)
 	stream.settings.config_sequence = config->sequence;
 	LightLock_Lock(&stream.runtime.lock);
 	apply_screen_mask_locked(config->mask);
-	configure_stream(config->fps, config->rate, config->combined_fec,
-			 config->quality);
+	live_stream_configure(config->fps, config->rate, config->combined_fec,
+			      config->quality);
 	LightLock_Unlock(&stream.runtime.lock);
 	stream.runtime.last_status_tick = 0;
 }
@@ -1609,8 +1494,8 @@ static bool send_repair(u64 *total_due, u64 now, u64 next_fresh_due)
 	    .target = &stream.net.target,
 	    .session = stream.runtime.session,
 	    .rate = stream.settings.rate,
-	    .stopping = stopped,
-	    .capture_paused = capture_paused,
+	    .stopping = live_stream_stopped,
+	    .capture_paused = live_stream_capture_paused,
 	    .charge = repair_charge,
 	    .report = repair_report,
 	};
@@ -1634,9 +1519,10 @@ static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
 		u64 now = svcGetSystemTick();
 		poll_frame_feedback(now);
 		now = svcGetSystemTick();
-		if (stopped() || now > deadline) {
-			live_timing_finish(stopped() ? TIMING_STOPPED
-						     : TIMING_DEADLINE);
+		if (live_stream_stopped() || now > deadline) {
+			live_timing_finish(live_stream_stopped()
+					       ? TIMING_STOPPED
+					       : TIMING_DEADLINE);
 			return false;
 		}
 		u64 due = live_video_due(&pacing->video);
@@ -1722,11 +1608,12 @@ static void sender_purge_pending(u64 now)
 
 		if (head->epoch != stream.settings.config_epoch ||
 		    (head->r20 && !live_r20_recent(&stream.r20, now))) {
-			discard_pending(stream.pending.head,
-					TIMING_RECONFIGURED);
+			live_stream_discard_pending(stream.pending.head,
+						    TIMING_RECONFIGURED);
 		} else if (live_pending_expired(head, now, SYSCLOCK_ARM11,
 						stream.settings.fps)) {
-			discard_pending(stream.pending.head, TIMING_TOO_OLD);
+			live_stream_discard_pending(stream.pending.head,
+						    TIMING_TOO_OLD);
 			stream.counters.expired++;
 		} else {
 			break;
@@ -1751,9 +1638,10 @@ static bool sender_select_key(struct tx_frame *tx, u64 now)
 	if (send_key &&
 	    (svcGetSystemTick() - stream.row.last_key > SYSCLOCK_ARM11 / 4 ||
 	     stream.row.candidate->length[0] + stream.row.candidate->length[1] >
-		 pair_payload_budget(stream.settings.rate, stream.settings.fps,
-				     stream.settings.combined_fec,
-				     stream.settings.quality_target))) {
+		 live_stream_pair_budget(stream.settings.rate,
+					 stream.settings.fps,
+					 stream.settings.combined_fec,
+					 stream.settings.quality_target))) {
 		send_key = false;
 		stream.row.sends = 3;
 	}
@@ -1974,9 +1862,9 @@ static void sender(void *unused)
 	PacketPacing pacing = {.totalDue = svcGetSystemTick()};
 	bool sentFrame = false;
 	u32 lastSentSeq = 0;
-	while (!stopped()) {
+	while (!live_stream_stopped()) {
 		control(&pacing.totalDue);
-		if (!stream.net.media_ready || capture_paused()) {
+		if (!stream.net.media_ready || live_stream_capture_paused()) {
 			svcSleepThread(10000000);
 			return;
 		}
@@ -2177,7 +2065,7 @@ static void stream_write_stats(bool timing_saved)
 	    .last_send_errno = stream.runtime.last_errno,
 	    .payload_target_percent = stream.runtime.payload_control.percent,
 	    .quality_target = stream.settings.quality_target,
-	    .pair_payload_budget = pair_payload_budget(
+	    .pair_payload_budget = live_stream_pair_budget(
 		stream.settings.rate, stream.settings.fps,
 		stream.settings.combined_fec, stream.settings.quality_target),
 	    .rate_pending_kept = stream.counters.rate_pending_kept,
@@ -2316,8 +2204,8 @@ void live_stop(void)
 bool live_submit(int sc, const u8 *frame, u32 fmt, u32 stride, u32 pts,
 		 bool wide)
 {
-	if (sc < 0 || sc > 1 || !stream.runtime.worker || stopped() ||
-	    capture_paused() || wide)
+	if (sc < 0 || sc > 1 || !stream.runtime.worker ||
+	    live_stream_stopped() || live_stream_capture_paused() || wide)
 		return false;
 	u64 begin = svcGetSystemTick();
 	u32 w = sc ? 320 : 400;
@@ -2346,7 +2234,7 @@ bool live_submit(int sc, const u8 *frame, u32 fmt, u32 stride, u32 pts,
 }
 void live_schedule(u32 stamp, u32 top, u32 bottom, u32 mask)
 {
-	if (!stream.runtime.worker || stopped())
+	if (!stream.runtime.worker || live_stream_stopped())
 		return;
 	LightLock_Lock(&stream.runtime.lock);
 	stream.runtime.plan_stamp = stamp;
