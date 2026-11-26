@@ -277,7 +277,7 @@ int main(int argc, char **argv) {
         !cap->menu()->actions().contains(fixed)) return 103;
     auto *jpegMenu = root->findChild<QMenu *>("jpegQualityMenu");
     auto *jpegChoice = root->findChild<QComboBox *>("jpegQuality");
-    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 6 || jpegChoice->currentData().toInt() != 0 ||
+    if (!jpegMenu || !jpegChoice || jpegChoice->count() != 5 || jpegChoice->currentData().toInt() != 0 ||
         sourceJpeg->menu() != jpegMenu || sourceJpeg->text() != "自动Q" ||
         pictureMenu->actions().contains(jpegMenu->menuAction()))
         return 95;
@@ -540,7 +540,7 @@ int main(int argc, char **argv) {
                                             {"jpegQuality",80},{"adaptiveRate",false}}}) return 131;
     update(R"({"fps":30,"jpegQuality":80,"rate":2000000,"adaptiveRate":false})");
     if (!matchingPreset(hd)) return 149;
-    update(R"({"jpegQuality":70})");
+    update(R"({"jpegQuality":60})");
     if (!matchingPreset(balancedNow)) return 150;
     update(R"({"adaptiveRate":true})");
     if (!matchingPreset(nullptr)) return 151;
@@ -549,7 +549,7 @@ int main(int argc, char **argv) {
     update(R"({"rate":2000000,"fps":24})");
     if (!matchingPreset(nullptr)) return 153;
     update(R"({"fps":30,"jpegQuality":60})");
-    if (!matchingPreset(nullptr)) return 154;
+    if (!matchingPreset(balancedNow)) return 154;
     update(R"({"fps":24,"jpegQuality":40,"rate":1000000})");
     if (!matchingPreset(low)) return 155;
     update(R"({"fps":30,"jpegQuality":20,"rate":800000,"adaptiveRate":false})");
@@ -560,7 +560,7 @@ int main(int argc, char **argv) {
     if (!balanced) return 132;
     balanced->trigger();
     if (!actions().isEmpty() || sourceFps->currentData() != 30 || sourceRate->currentData() != 2000000 ||
-        jpegChoice->currentData() != 70 || rateMode->currentData().toBool()) return 133;
+        jpegChoice->currentData() != 60 || rateMode->currentData().toBool()) return 133;
     // The editable dialog contains a draft. The live menu still describes the running configuration.
     if (!matchingPreset(low)) return 156;
     jpegChoice->setCurrentIndex(jpegChoice->findData(40));
