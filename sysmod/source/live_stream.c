@@ -8,6 +8,7 @@
 #include "live_net.h"
 #include "live_row.h"
 #include "live_r20.h"
+#include "live_repair_tx.h"
 #include "buffers.h"
 #include "capture.h"
 #include "live_timing.h"
@@ -44,7 +45,8 @@ static _Alignas(LZ4_stream_t) u8 encoded[2][MAX_JPEG];
 static u8 pendingBytes[2 * MAX_JPEG], sendArena[2 * MAX_JPEG];
 static LivePendingQueue pending;
 static LiveRepairHistory repairHistory;
-static u32 repairCredit, repairRequests, repairPackets, repairWireBytes;
+static struct live_repair_tx repair_tx;
+static u32 repairRequests;
 static u64 repairInterest, repairPeerAt, lastRepairPoll, sendActiveTicks;
 /* The socket worker can pick up a NACK inside a send slot. A different
  * control packet is deferred intact until the slot has finished. */
@@ -465,7 +467,7 @@ static void configure_stream(u32 hz, u32 bps, bool fec, unsigned targetQ)
 		configEpoch++;
 		rowBase = rowCandidate = rowProbe = NULL;
 		live_repair_clear(&repairHistory);
-		repairCredit = 0;
+		repair_tx.credit = 0;
 	}
 	u32 budget = pair_payload_budget(bps, hz, fec, targetQ);
 	unsigned count = pending.count, head = pending.head;
@@ -907,7 +909,7 @@ static void reset_peer_config(void)
 	pacingMode = 1;
 	packetReport.flags = 0;
 	live_repair_clear(&repairHistory);
-	repairInterest = repairPeerAt = repairCredit = 0;
+	repairInterest = repairPeerAt = repair_tx.credit = 0;
 	deferredControl.size = 0;
 	net.last_peer_control = 0;
 	rowLastAck = 0;
@@ -1162,8 +1164,8 @@ static void send_status_burst(u64 *due)
 	    .overwritten = overwritten,
 	    .row_repeats = rowRepeats,
 	    .repair_requests = repairRequests,
-	    .repair_packets = repairPackets,
-	    .repair_wire_bytes = repairWireBytes,
+	    .repair_packets = repair_tx.packets,
+	    .repair_wire_bytes = repair_tx.wire_bytes,
 	    .audio_dropped = audio.queue.dropped,
 	    .audio_expired = audio.queue.expired,
 	    .send_active_us =
@@ -1329,51 +1331,40 @@ typedef struct {
 /* Use spare wire time between fresh packets. A repair shares the strict
  * total clock with audio and never advances the fresh video's slot
  * clock. */
-static bool send_repair(u64 *totalDue, u64 now, u64 nextFreshDue)
+static void repair_charge(u64 *due, u64 begin, u64 returned, u32 wire, int kind)
 {
-	if (!repairCredit || now < *totalDue || stopped() || capture_paused())
-		return false;
-	LiveRepairFrame *f = live_repair_next(&repairHistory, now);
-	if (!f)
-		return false;
-	u32 index = f->indices[f->next], off = index * LIVE_CHUNK;
-	u32 len = f->top + f->bottom - off;
-	if (len > LIVE_CHUNK)
-		len = LIVE_CHUNK;
-	u32 wire = len + 60;
-	if (wire > repairCredit)
-		return false;
-	if (nextFreshDue && live_packet_due(*totalDue, now, wire, rate,
-					    SYSCLOCK_ARM11) > nextFreshDue)
-		return false;
-	u8 packet[LIVE_CHUNK + 32];
-	memcpy(packet, "R19P", 4);
-	put32(packet + 4, session);
-	put32(packet + 8, f->seq);
-	put32(packet + 12, f->pts);
-	put32(packet + 16, f->top);
-	put32(packet + 20, f->bottom);
-	put32(packet + 24, index);
-	put32(packet + 28, f->fps);
-	memcpy(packet + 32, sendArena + f->offset + off, len);
-	u64 begin = svcGetSystemTick();
-	int sent = sendto(net.fd, packet, 32 + len, 0,
-			  (struct sockaddr *)&net.target, sizeof net.target);
-	u64 returned = svcGetSystemTick();
-	pacing_charge(totalDue, begin, returned, wire, PACKET_REPAIR);
-	if (!f->next && sent == (int)(32 + len)) {
-		packetReport.repair =
-		    (LivePacketSample){f->seq, f->pts, index, begin, returned};
-		packetReport.flags |= 4;
-	}
-	repairCredit -= wire;
-	f->next++;
-	if (sent == (int)(32 + len)) {
-		repairPackets++;
-		repairWireBytes += wire;
-		videoWireBytes += wire;
-	}
-	return true;
+	pacing_charge(due, begin, returned, wire, (enum LivePacketKind)kind);
+}
+
+static void repair_report(u32 seq, u32 pts, u32 index, u64 begin, u64 returned)
+{
+	packetReport.repair = (LivePacketSample){.seq = seq,
+						 .pts = pts,
+						 .index = index,
+						 .begin = begin,
+						 .end = returned};
+	packetReport.flags |= 4;
+}
+
+static bool send_repair(u64 *total_due, u64 now, u64 next_fresh_due)
+{
+	struct live_repair_io io = {
+	    .fd = net.fd,
+	    .target = &net.target,
+	    .session = session,
+	    .rate = rate,
+	    .stopping = stopped,
+	    .capture_paused = capture_paused,
+	    .charge = repair_charge,
+	    .report = repair_report,
+	};
+	bool sent = live_repair_tx_send(&repair_tx, &repairHistory, sendArena,
+					sizeof sendArena, fps, total_due, now,
+					next_fresh_due, &io);
+
+	if (sent && repair_tx.last_wire)
+		videoWireBytes += repair_tx.last_wire;
+	return sent;
 }
 
 static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
@@ -1392,7 +1383,7 @@ static bool send_packet(PacketPacing *pacing, u64 deadline, const char *magic,
 			return false;
 		}
 		u64 due = live_video_due(&pacing->video);
-		if (!usedGap && repairCredit && pacing->totalDue < due &&
+		if (!usedGap && repair_tx.credit && pacing->totalDue < due &&
 		    now < due && live_repair_next(&repairHistory, now)) {
 			if (send_repair(&pacing->totalDue, now, due)) {
 				usedGap = true;
@@ -1607,7 +1598,7 @@ static void sender(void *unused)
 		u32 wire = shared ? live_combined_wire(sizes[0] + sizes[1])
 				  : live_screen_wire(sizes[0]) +
 					live_screen_wire(sizes[1]);
-		repairCredit =
+		repair_tx.credit =
 		    shared
 			? live_repair_allowance(
 			      live_av_video_rate(rate, audioEnabled), fps, wire)
@@ -1755,7 +1746,8 @@ static void stream_reset(void)
 	rowKeys = rowRepeats = rowDeltas = rowAcks = rowSends = 0;
 	manualRenderFailures = manualWireDrops = 0;
 	repairHistory = (LiveRepairHistory){0};
-	repairRequests = repairPackets = repairWireBytes = repairCredit = 0;
+	repairRequests = 0;
+	repair_tx = (struct live_repair_tx){0};
 	deferredControl.size = 0;
 	lastRepairPoll = repairInterest = repairPeerAt = sendActiveTicks = 0;
 	probeAfter = 0;
@@ -1883,8 +1875,8 @@ static void stream_write_stats(bool timing_saved)
 	    .manual_render_failures = manualRenderFailures,
 	    .manual_wire_budget_drops = manualWireDrops,
 	    .repair_requests = repairRequests,
-	    .repair_packets = repairPackets,
-	    .repair_wire_bytes = repairWireBytes,
+	    .repair_packets = repair_tx.packets,
+	    .repair_wire_bytes = repair_tx.wire_bytes,
 	    .repair_nack_cache_miss = repairHistory.missing,
 	    .repair_nack_stale = repairHistory.stale,
 	    .repair_nack_duplicate = repairHistory.duplicate,
