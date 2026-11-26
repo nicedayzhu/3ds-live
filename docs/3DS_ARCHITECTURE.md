@@ -17,6 +17,8 @@
 | `live_stats.c` | `live-stats.txt` 快照格式化 | `test_live_stats` |
 | `live_row.h` | 行复用锚点/计划类型 | — |
 | `live_r20.c` | R20 增量 + LZ4 字典 | — |
+| `live_repair_packet.c` | R19P 32 字节头 | `test_live_repair_packet` |
+| `live_repair_tx.c` | repair credit、空闲时隙发送、packet report | — |
 | `launcher_module.c` | 模块发现、安装、状态轮询、页面切换 | — |
 
 ## 仍位于 `live_stream.c` 的核心
@@ -46,7 +48,8 @@ pwsh -File scripts/check-3ds-style.ps1
 pwsh -File scripts/build-handheld.ps1 -Bash F:\Tools\msys64\usr\bin\bash.exe
 
 # 主机协议测试
-make -C live/tests/native check
+make -C live/tests/native all
+# Windows 下用 scripts/verify-all.ps1 统一构建/运行
 
 # PC
 pwsh -File live/qt/build.ps1 -QtSdk .toolchains/qt/6.10.3/msvc2022_64
@@ -57,13 +60,22 @@ flutter analyze
 cd android && ./gradlew testDebugUnitTest
 ```
 
-2026-11-26 的重构批次结果：
+2026-11-26 的重构批次结果（`scripts/verify-all.ps1`）：
 
 - 3DS 交叉编译通过；
-- kernel style 71 个文件通过；
-- native tests 22/22 通过；
+- kernel style 75 个文件通过；
+- native tests 23/23 通过；
 - PC 客户端构建通过；
 - Android analyze + unit test 通过。
+
+当前 `live_stream.c` 约 2120 行，已完成：
+
+- `control()` / `control_receive()` / `send_status_burst()` 分离；
+- `encoder()` / `encoder_bottom_worker()` / `encoder_read_plan()` / `encoder_snapshot_raw()`；
+- `encode_pair()` → `pair_requantize()` / `pair_publish()`；
+- `sender()` / `sender_prepare()` / `sender_purge_pending()` / `sender_select_key()` / `sender_copy_panels()` / `sender_send_frame()`；
+- `live_start()` / `stream_reset()` / `stream_open_resources()`；
+- `live_stop()` / `stream_join_threads()` / `stream_close_resources()` / `stream_write_stats()`。
 
 尚未完成：掌机实机回归、`live_encoder` / `live_sender` 文件级拆分、
 `struct live_stream` 状态收敛。
