@@ -1268,78 +1268,47 @@ static void control(u64 *due)
 	    .audio_packets_sent = audio.packets_sent,
 	    .audio_queue_depth = live_audio_queue_depth(&audio.queue),
 	};
-	u8 msg[108];
-	const u32 msgBytes =
-	    (u32)live_status_main_build(msg, sizeof(msg), &status);
-	const u32 durationMs = status.duration_ms;
-	uint32_t pacingWords[LIVE_PACING_WORDS];
-	live_packet_snapshot(&packetReport, pacingWords, session, durationMs,
-			     pacingMode, started, SYSCLOCK_ARM11);
-	lastStatusTick = send_status(due, msg, msgBytes);
-	memcpy(msg, "R16S", 4);
-	put32(msg + 4, session);
-	put32(msg + 8, 1);
-	put32(msg + 12, qualityTarget);
-	put32(msg + 16, durationMs);
-	send_status(due, msg, 20);
-	memcpy(msg, "R16Q", 4);
-	put32(msg + 4, session);
-	put32(msg + 8, 1);
-	put32(msg + 12, LIVE_JPEG_EXTRA_QUALITY);
-	send_status(due, msg, 16);
-	/* Cumulative accepted media IPv4 bytes, including FEC and repeated
-	 * keys. Status, net.discovery and failed sends do not count. Totals
-	 * wrap at 2^32. */
-	memcpy(msg, "R17T", 4);
-	put32(msg + 4, session);
-	put32(msg + 8, durationMs);
-	put32(msg + 12, (u32)(audio.wire_bytes + videoWireBytes));
-	put32(msg + 16, (u32)videoWireBytes);
-	send_status(due, msg, 20);
-	if (rowBanks && compactJpeg) {
-		memcpy(msg, "R17S", 4);
-		put32(msg + 4, session);
-		put32(msg + 8, 1);
-		send_status(due, msg, 12);
-		if (combinedFec) {
-			memcpy(msg, "R20S", 4);
-			send_status(due, msg, 12);
-		}
-	}
-	if (combinedFec) {
-		memcpy(msg, "R19S", 4);
-		put32(msg + 4, session);
-		put32(msg + 8, 1);
-		put32(msg + 12, LIVE_REPAIR_MAX);
-		send_status(due, msg, 16);
-	}
+	uint32_t pacing_words[LIVE_PACING_WORDS];
 	LightLock_Lock(&lock);
-	u32 overwritten = replaced;
+	uint32_t overwritten = replaced;
 	LightLock_Unlock(&lock);
-	const u32 timing[] = {
-	    session,
-	    durationMs,
-	    overwritten,
-	    rowRepeats,
-	    repairRequests,
-	    repairPackets,
-	    repairWireBytes,
-	    audio.queue.dropped,
-	    audio.queue.expired,
-	    (u32)(sendActiveTicks / SYSCLOCK_ARM11 * 1000000ull +
-		  (sendActiveTicks % SYSCLOCK_ARM11) * 1000000ull /
-		      SYSCLOCK_ARM11)};
-	memcpy(msg, "R19T", 4);
-	for (unsigned i = 0; i < sizeof timing / sizeof timing[0]; i++)
-		put32(msg + 4 + 4 * i, timing[i]);
-	send_status(due, msg, 4 + sizeof timing);
-	memcpy(msg, "R21S", 4);
-	put32(msg + 4, session);
-	put32(msg + 8, 1);
-	put32(msg + 12, pacingMode);
-	send_status(due, msg, 16);
-	/* ARM11 and the R21T word layout are both little endian. */
-	send_status(due, (const u8 *)pacingWords, sizeof pacingWords);
+	live_packet_snapshot(&packetReport, pacing_words, session,
+			     status.duration_ms, pacingMode, started,
+			     SYSCLOCK_ARM11);
+	struct live_status_aux aux = {
+	    .session = session,
+	    .duration_ms = status.duration_ms,
+	    .quality_target = qualityTarget,
+	    .overwritten = overwritten,
+	    .row_repeats = rowRepeats,
+	    .repair_requests = repairRequests,
+	    .repair_packets = repairPackets,
+	    .repair_wire_bytes = repairWireBytes,
+	    .audio_dropped = audio.queue.dropped,
+	    .audio_expired = audio.queue.expired,
+	    .send_active_us =
+		(u32)(sendActiveTicks / SYSCLOCK_ARM11 * 1000000ull +
+		      (sendActiveTicks % SYSCLOCK_ARM11) * 1000000ull /
+			  SYSCLOCK_ARM11),
+	    .compact_jpeg = compactJpeg,
+	    .rows_enabled = rowBanks != NULL,
+	    .combined_fec = combinedFec,
+	    .audio_wire_bytes = audio.wire_bytes,
+	    .video_wire_bytes = videoWireBytes,
+	    .pacing_mode = pacingMode,
+	};
+	memcpy(aux.pacing_words, pacing_words, sizeof(aux.pacing_words));
+	u8 burst[512];
+	struct live_status_packet packets[LIVE_STATUS_MAX_PACKETS];
+	unsigned packet_count =
+	    live_status_build_burst(burst, sizeof(burst), &status, &aux,
+				    packets, LIVE_STATUS_MAX_PACKETS);
+	if (!packet_count)
+		return;
+	lastStatusTick =
+	    send_status(due, burst + packets[0].offset, packets[0].size);
+	for (unsigned i = 1; i < packet_count; i++)
+		send_status(due, burst + packets[i].offset, packets[i].size);
 #ifdef LIVE_FRAME_TIMING
 	u32 capacity;
 	if (live_timing_marker(lastStatusTick, &capacity)) {

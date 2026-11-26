@@ -13,6 +13,44 @@ static uint32_t get32(const uint8_t *p)
 	       (uint32_t)p[3] << 24;
 }
 
+static void test_burst_layout(void)
+{
+	struct live_status_main main_status = {
+	    .session = 7,
+	    .duration_ms = 8,
+	    .rate = 2000000,
+	    .fps = 30,
+	    .encoder_core_top = 2,
+	    .encoder_core_bottom = 3,
+	};
+	struct live_status_aux aux = {
+	    .session = 7,
+	    .duration_ms = 8,
+	    .quality_target = 40,
+	    .compact_jpeg = true,
+	    .rows_enabled = true,
+	    .combined_fec = true,
+	    .pacing_mode = 1,
+	};
+	struct live_status_packet packets[LIVE_STATUS_MAX_PACKETS];
+	uint8_t burst[512];
+	unsigned count;
+
+	count = live_status_build_burst(burst, sizeof(burst), &main_status,
+					&aux, packets, LIVE_STATUS_MAX_PACKETS);
+	assert(count == 10);
+	assert(memcmp(burst + packets[0].offset, "R7ST", 4) == 0);
+	assert(memcmp(burst + packets[1].offset, "R16S", 4) == 0);
+	assert(memcmp(burst + packets[2].offset, "R16Q", 4) == 0);
+	assert(memcmp(burst + packets[3].offset, "R17T", 4) == 0);
+	assert(memcmp(burst + packets[4].offset, "R17S", 4) == 0);
+	assert(memcmp(burst + packets[5].offset, "R20S", 4) == 0);
+	assert(memcmp(burst + packets[6].offset, "R19S", 4) == 0);
+	assert(memcmp(burst + packets[7].offset, "R19T", 4) == 0);
+	assert(memcmp(burst + packets[8].offset, "R21S", 4) == 0);
+	assert(packets[9].size == 192);
+}
+
 int main(void)
 {
 	struct live_status_main status = {
@@ -62,6 +100,7 @@ int main(void)
 
 	assert(live_status_main_build(packet, 8, &status) == 0);
 	assert(live_status_main_build(NULL, 108, &status) == 0);
+	test_burst_layout();
 	puts("test_live_status: ok");
 	return 0;
 }
