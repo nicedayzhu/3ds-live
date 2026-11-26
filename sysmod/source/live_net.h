@@ -8,6 +8,7 @@
 #ifndef LIVE_NET_H
 #define LIVE_NET_H
 
+#include "live_discovery.h"
 #include "live_net_report.h"
 
 #include <netinet/in.h>
@@ -42,6 +43,9 @@ struct live_net {
 	bool media_ready;
 	uint32_t local_address;
 	uint32_t local_mask;
+	LiveDiscovery discovery;
+	uint64_t last_probe_tick;
+	uint64_t last_peer_control;
 	struct live_net_diag diag;
 };
 

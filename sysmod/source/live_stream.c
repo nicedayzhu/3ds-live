@@ -63,11 +63,9 @@ static Thread worker, encoders[2];
 static s32 encoderCores[2];
 static int lastErrno;
 #define SOC_ARENA_BYTES 0x100000u
-static LiveDiscovery discovery;
 static LiveReceiverFeedback receiverFeedback;
 static bool receiverVideo;
 static bool capturePaused;
-static u64 lastProbeTick, lastPeerControl;
 static struct live_net net = {.fd = -1};
 static u32 fps = 30, rate = 800000, configEpoch, configSequence;
 static unsigned qualityTarget;
@@ -934,7 +932,7 @@ static bool send_discovery_probe(const u8 *probe, u32 address, u64 *due)
 	destination.sin_addr.s_addr = htonl(address);
 	net.diag.last_destination = address;
 	net.diag.probe_attempts++;
-	bool paired = net.media_ready && address == discovery.peer;
+	bool paired = net.media_ready && address == net.discovery.peer;
 	if (paired && pacingMode)
 		pacing_sleep_until(*due);
 	u64 begin = paired ? svcGetSystemTick() : 0;
@@ -989,7 +987,7 @@ static void reset_peer_config(void)
 	live_repair_clear(&repairHistory);
 	repairInterest = repairPeerAt = repairCredit = 0;
 	deferredControl.size = 0;
-	lastPeerControl = 0;
+	net.last_peer_control = 0;
 	rowLastAck = 0;
 	configSequence = 0;
 	LightLock_Lock(&lock);
@@ -1005,24 +1003,27 @@ static void reset_peer_config(void)
 
 static void poll_discovery(u64 now, u64 *due)
 {
-	bool expired = live_discover_expire(&discovery, now, SYSCLOCK_ARM11);
-	if (!expired && lastProbeTick && now - lastProbeTick < SYSCLOCK_ARM11)
+	bool expired =
+	    live_discover_expire(&net.discovery, now, SYSCLOCK_ARM11);
+	if (!expired && net.last_probe_tick &&
+	    now - net.last_probe_tick < SYSCLOCK_ARM11)
 		return;
-	lastProbeTick = now;
+	net.last_probe_tick = now;
 	net.diag.polls++;
 	if (net.fd < 0)
 		live_net_open(&net);
 	/* A live reply on this socket verifies the route. Avoid a synchronous
 	 * SOC network-configuration query on each second of an active stream.
 	 */
-	if (!expired && net.media_ready && lastPeerControl &&
-	    now >= lastPeerControl &&
-	    now - lastPeerControl <
+	if (!expired && net.media_ready && net.last_peer_control &&
+	    now >= net.last_peer_control &&
+	    now - net.last_peer_control <
 		(u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11) {
-		if (net.automatic_host && discovery.peer) {
+		if (net.automatic_host && net.discovery.peer) {
 			u8 probe[LIVE_DISCOVERY_BYTES];
-			live_discover_invited_probe(&discovery, session, probe);
-			send_discovery_probe(probe, discovery.peer, due);
+			live_discover_invited_probe(&net.discovery, session,
+						    probe);
+			send_discovery_probe(probe, net.discovery.peer, due);
 		}
 		return;
 	}
@@ -1041,8 +1042,8 @@ static void poll_discovery(u64 now, u64 *due)
 	if (expired || moved) {
 		__atomic_store_n(&net.media_ready, false, __ATOMIC_RELEASE);
 		reset_receiver_feedback();
-		discovery.peer = 0;
-		discovery.outstanding = false;
+		net.discovery.peer = 0;
+		net.discovery.outstanding = false;
 		if (net.automatic_host)
 			net.target.sin_addr.s_addr = 0;
 		reset_peer_config();
@@ -1070,9 +1071,9 @@ static void poll_discovery(u64 now, u64 *due)
 				      net.local_address, net.local_mask);
 		if (!usable && net.media_ready)
 			reset_receiver_feedback();
-		if (lastPeerControl &&
+		if (net.last_peer_control &&
 		    (!usable ||
-		     now - lastPeerControl >=
+		     now - net.last_peer_control >=
 			 (u64)LIVE_PEER_LEASE_SECONDS * SYSCLOCK_ARM11))
 			reset_peer_config();
 		bool wasReady = net.media_ready;
@@ -1082,10 +1083,10 @@ static void poll_discovery(u64 now, u64 *due)
 		return;
 	}
 	u8 probe[LIVE_DISCOVERY_BYTES];
-	live_discover_probe(&discovery, session, probe);
+	live_discover_probe(&net.discovery, session, probe);
 	bool sent;
-	if (discovery.peer)
-		sent = send_discovery_probe(probe, discovery.peer, due);
+	if (net.discovery.peer)
+		sent = send_discovery_probe(probe, net.discovery.peer, due);
 	else {
 		/* Routers and SOC implementations differ in handling subnet vs
 		 * limited broadcast. Both probes share one challenge and expose
@@ -1100,11 +1101,11 @@ static void poll_discovery(u64 now, u64 *due)
 			sent = true;
 	}
 	if (!sent) {
-		discovery.outstanding = false;
+		net.discovery.outstanding = false;
 		/* Even if SOC refuses outbound broadcasts, the fixed listener
 		 * must stay open so a PC invitation can initiate the unicast
 		 * handshake. */
-		if (!discovery.peer && net.diag.bind_errno) {
+		if (!net.discovery.peer && net.diag.bind_errno) {
 			live_net_close(&net);
 			net.diag.local_port = 0;
 		}
@@ -1124,9 +1125,9 @@ static u64 send_status(u64 *due, const u8 *msg, u32 size)
 /* Call only after address, port, session and control payload validation. */
 static void peer_activity(u64 now)
 {
-	lastPeerControl = now;
+	net.last_peer_control = now;
 	if (net.automatic_host)
-		live_discover_activity(&discovery,
+		live_discover_activity(&net.discovery,
 				       ntohl(net.target.sin_addr.s_addr), now);
 }
 
@@ -1291,7 +1292,7 @@ static void control(u64 *due)
 	}
 	if (deferredControl.size ||
 	    now - lastControlTick >= SYSCLOCK_ARM11 / 100 ||
-	    now - lastProbeTick >= SYSCLOCK_ARM11) {
+	    now - net.last_probe_tick >= SYSCLOCK_ARM11) {
 		lastControlTick = now;
 		for (unsigned i = 0; i < 16; i++) {
 			u8 msg[64];
@@ -1316,7 +1317,7 @@ static void control(u64 *due)
 			if (size < sizeof from || from.sin_family != AF_INET ||
 			    from.sin_port != net.target.sin_port)
 				continue;
-			if (net.automatic_host && !discovery.peer &&
+			if (net.automatic_host && !net.discovery.peer &&
 			    live_discover_invitation(msg, (size_t)n)) {
 				u32 address = ntohl(from.sin_addr.s_addr);
 				if (!live_reply_address(address,
@@ -1331,8 +1332,8 @@ static void control(u64 *due)
 					continue;
 				net.diag.last_hint_tick = now;
 				u8 probe[LIVE_DISCOVERY_BYTES];
-				live_discover_invited_probe(&discovery, session,
-							    probe);
+				live_discover_invited_probe(&net.discovery,
+							    session, probe);
 				if (send_discovery_probe(probe, address, due))
 					net.diag.hints_answered++;
 				continue;
@@ -1341,17 +1342,17 @@ static void control(u64 *due)
 				continue;
 			if (net.automatic_host && n >= 4 &&
 			    !memcmp(msg, "3DLA", 4)) {
-				bool first = !discovery.peer;
+				bool first = !net.discovery.peer;
 				u32 address = ntohl(from.sin_addr.s_addr);
 				if (live_reply_address(address,
 						       net.local_address,
 						       net.local_mask) &&
 				    address != net.diag.reported_broadcast &&
-				    live_discover_ack(&discovery, address,
+				    live_discover_ack(&net.discovery, address,
 						      session, msg, (size_t)n,
 						      now)) {
 					net.diag.accepted++;
-					lastPeerControl = now;
+					net.last_peer_control = now;
 					if (first) {
 						net.target.sin_addr =
 						    from.sin_addr;
@@ -1433,8 +1434,8 @@ static void control(u64 *due)
 	put32(msg + 12, LIVE_JPEG_EXTRA_QUALITY);
 	send_status(due, msg, 16);
 	/* Cumulative accepted media IPv4 bytes, including FEC and repeated
-	 * keys. Status, discovery and failed sends do not count. Totals wrap at
-	 * 2^32. */
+	 * keys. Status, net.discovery and failed sends do not count. Totals
+	 * wrap at 2^32. */
 	memcpy(msg, "R17T", 4);
 	put32(msg + 4, session);
 	put32(msg + 8, durationMs);
@@ -1945,9 +1946,9 @@ Result live_start(void *(*allocate)(u32 bytes))
 	if (!session)
 		session = 1;
 	lastStatusTick = lastControlTick = started;
-	discovery = (LiveDiscovery){.challenge = (u32)(started >> 16)};
+	net.discovery = (LiveDiscovery){.challenge = (u32)(started >> 16)};
 	reset_receiver_feedback();
-	lastProbeTick = lastPeerControl = 0;
+	net.last_probe_tick = net.last_peer_control = 0;
 	net.local_address = net.local_mask = 0;
 	memset(&net.diag, 0, sizeof(net.diag));
 	__atomic_store_n(&net.media_ready, false, __ATOMIC_RELEASE);
