@@ -53,9 +53,15 @@ build/%.o: source/%.c Makefile
 3ds-live.3dsx: 3ds-live.elf 3ds-live.smdh $(EMBEDDED)
 	3dsxtool $< $@ --smdh=3ds-live.smdh --romfs=build/romfs
 
-build/banner.bnr: assets/banner.png assets/banner.wav
+# The banner is checked in so CI does not need bannertool; regenerate it with
+# "make banner" after changing banner.png or banner.wav.
+build/banner.bnr: assets/banner.bnr
 	@mkdir -p $(@D)
-	bannertool makebanner -i $< -a assets/banner.wav -o $@
+	cp $< $@
+
+.PHONY: banner
+banner:
+	bannertool makebanner -i assets/banner.png -a assets/banner.wav -o assets/banner.bnr
 
 build/3ds-live.cia: 3ds-live.elf 3ds-live.smdh build/banner.bnr cia.rsf $(EMBEDDED) cia_version.py ../VERSION
 	makerom -f cia -o $@ -rsf cia.rsf -elf $< -icon 3ds-live.smdh -banner build/banner.bnr -exefslogo -ver "$$($(PYTHON) cia_version.py --print ../VERSION)"
